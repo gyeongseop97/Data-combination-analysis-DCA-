@@ -1050,7 +1050,7 @@ function gamePage() {
         <div class="workbook-sheet-content">
           <div class="sheet-menu" aria-hidden="true"><span>파일</span><span>편집</span><span>보기</span><span>게임</span><div></div><small>공유됨 · 자동 저장됨</small></div>
           <section class="game-banner">
-            <div class="room-label"><span class="eyebrow">${soloMode ? 'AI PRACTICE' : `ROOM ${state.room.code}`}</span><h1>${escapeHtml(GAME_TITLE)}</h1></div>
+            <div class="room-label"><span class="eyebrow">${soloMode ? 'AI PRACTICE' : `ROOM ${state.room.code}`}</span><div class="room-title-row"><h1>${escapeHtml(GAME_TITLE)}</h1><button class="game-home-button" type="button" data-action="home" aria-label="게임을 나가 첫 화면으로" title="첫 화면으로"><span aria-hidden="true">⌂</span><span>홈</span></button></div></div>
             ${turnClock()}
             <div class="pool-badge"><span>풀</span><strong>${state.poolCount}</strong></div>
           </section>

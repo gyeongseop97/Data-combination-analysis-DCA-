@@ -1420,3 +1420,33 @@ body[data-theme="sheet"] .board-grid[data-board-density="micro"] {
   body[data-theme="classic"]:has(.game-page) .draw-button,
   body[data-theme="classic"]:has(.game-page) .submit-button { min-height: 24px; font-size: 8px; }
 }
+/* Keep an explicit way back to the home screen even when mobile hides workbook chrome. */
+.room-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.room-title-row h1 { min-width: 0; }
+.game-home-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 8px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, .12);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 760;
+}
+.game-home-button:hover { color: var(--ink); border-color: var(--lime); background: rgba(198, 228, 109, .1); }
+.game-home-button span[aria-hidden="true"] { font-size: 13px; line-height: 1; }
+body[data-theme="sheet"] .game-home-button { border-color: #b7c7be; border-radius: 2px; color: #286148; background: #fff; }
+body[data-theme="sheet"] .game-home-button:hover { border-color: #217346; color: #155b3c; background: #edf8f1; }
+
+@media (max-width: 820px) and (orientation: portrait), (max-width: 1024px) and (orientation: landscape) and (max-height: 700px) {
+  .game-page .room-title-row { gap: 4px; }
+  .game-page .room-title-row h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .game-page .game-home-button { min-height: 22px; padding: 0 5px; font-size: 8px; }
+  .game-page .game-home-button span[aria-hidden="true"] { font-size: 10px; }
+}
