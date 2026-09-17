@@ -460,3 +460,120 @@ body[data-theme="sheet"] .workbook-sheet-content > .submission-history-card { wi
   body[data-theme="sheet"] .board-grid { --board-height: clamp(220px, 42dvh, 280px); }
   .submission-history-card { margin-top: 10px; padding: 11px 12px; }
 }
+/* Spreadsheet-first home: a neutral workbook landing page that preserves the same actions. */
+.home-file-title { overflow-wrap: anywhere; font-size: clamp(36px, 5.7vw, 66px) !important; line-height: 1.03 !important; }
+body[data-theme="sheet"] .home-page.sheet-home-page {
+  width: 100%;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  color: #1f1f1f;
+  background: #fff;
+}
+body[data-theme="sheet"] .sheet-home-formula {
+  display: grid;
+  grid-template-columns: 90px 33px minmax(0,1fr);
+  align-items: stretch;
+  height: 37px;
+  border-bottom: 1px solid #c8c8c8;
+  background: #f7f7f7;
+}
+body[data-theme="sheet"] .sheet-home-name-box,
+body[data-theme="sheet"] .sheet-home-formula-mark,
+body[data-theme="sheet"] .sheet-home-formula p {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 4px 0;
+  border-right: 1px solid #d1d1d1;
+  padding: 0 8px;
+  color: #333;
+  background: #fff;
+  font-size: 10px;
+}
+body[data-theme="sheet"] .sheet-home-name-box { justify-content: center; margin-left: 6px; border: 1px solid #c6c6c6; }
+body[data-theme="sheet"] .sheet-home-formula-mark { justify-content: center; border: 0; color: #606060; background: transparent; font-family: Georgia, serif; font-size: 16px; font-style: italic; }
+body[data-theme="sheet"] .sheet-home-formula p { overflow: hidden; margin-right: 7px; border: 1px solid #c6c6c6; text-overflow: ellipsis; white-space: nowrap; }
+body[data-theme="sheet"] .sheet-home-workspace {
+  display: grid;
+  grid-template-columns: 31px minmax(0,1fr);
+  grid-template-rows: 24px minmax(510px,calc(100dvh - 190px));
+  width: 100%;
+  min-width: 720px;
+  overflow: hidden;
+  background: #fff;
+}
+body[data-theme="sheet"] .sheet-home-corner { grid-column: 1; grid-row: 1; border-right: 1px solid #c4c4c4; border-bottom: 1px solid #c4c4c4; background: linear-gradient(135deg,transparent 49%,#b9b9b9 50%,transparent 51%),#f3f3f3; }
+body[data-theme="sheet"] .sheet-home-columns { display: grid; grid-column: 2; grid-row: 1; grid-template-columns: repeat(16,minmax(56px,1fr)); min-width: 896px; overflow: hidden; border-bottom: 1px solid #c4c4c4; color: #1d1d1d; background: #f3f3f3; }
+body[data-theme="sheet"] .sheet-home-columns span { display: grid; place-items: center; border-right: 1px solid #d0d0d0; font-size: 10px; }
+body[data-theme="sheet"] .sheet-home-rows { display: grid; grid-column: 1; grid-row: 2; grid-auto-rows: 24px; overflow: hidden; border-right: 1px solid #c4c4c4; color: #1d1d1d; background: #f3f3f3; }
+body[data-theme="sheet"] .sheet-home-rows span { display: grid; place-items: center; border-bottom: 1px solid #d0d0d0; font-size: 10px; }
+body[data-theme="sheet"] .sheet-home-canvas {
+  grid-column: 2;
+  grid-row: 2;
+  overflow: auto;
+  padding: 42px clamp(20px,6vw,92px) 58px;
+  background-color: #fff;
+  background-image: linear-gradient(#e1e1e1 1px,transparent 1px),linear-gradient(90deg,#e1e1e1 1px,transparent 1px);
+  background-size: 72px 24px;
+}
+body[data-theme="sheet"] .sheet-home-file-panel,
+body[data-theme="sheet"] .sheet-home-cards,
+body[data-theme="sheet"] .sheet-home-footer { width: min(1040px,100%); margin-right: auto; margin-left: auto; }
+body[data-theme="sheet"] .sheet-home-file-panel {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 22px;
+  border: 1px solid #bdbdbd;
+  padding: 17px 18px;
+  background: rgba(255,255,255,.97);
+}
+body[data-theme="sheet"] .sheet-home-file-panel p { margin: 0; color: #217346; font-size: 9px; font-weight: 800; letter-spacing: .1em; }
+body[data-theme="sheet"] .sheet-home-file-panel h1 { margin: 5px 0 3px; color: #1f1f1f; font-size: clamp(20px,2.8vw,30px); font-weight: 700; letter-spacing: -.045em; }
+body[data-theme="sheet"] .sheet-home-file-panel small { color: #676767; font-size: 10px; }
+body[data-theme="sheet"] .sheet-home-file-panel dl { display: flex; gap: 0; margin: 0; border: 1px solid #d7dfda; }
+body[data-theme="sheet"] .sheet-home-file-panel dl div { min-width: 62px; padding: 5px 8px; border-left: 1px solid #d7dfda; }
+body[data-theme="sheet"] .sheet-home-file-panel dl div:first-child { border-left: 0; }
+body[data-theme="sheet"] .sheet-home-file-panel dt { color: #727272; font-size: 8px; }
+body[data-theme="sheet"] .sheet-home-file-panel dd { margin: 2px 0 0; color: #2e513d; font-size: 10px; font-weight: 800; }
+body[data-theme="sheet"] .sheet-home-cards { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 0; margin-top: 18px; border: 1px solid #c9d3cd; background: rgba(255,255,255,.96); }
+body[data-theme="sheet"] .sheet-home-card { display: grid; align-content: start; gap: 10px; min-width: 0; min-height: 278px; border-left: 1px solid #d7dfda; padding: 15px; background: rgba(255,255,255,.94); }
+body[data-theme="sheet"] .sheet-home-card:first-child { border-left: 0; }
+body[data-theme="sheet"] .sheet-home-card-title { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-bottom: 2px; }
+body[data-theme="sheet"] .sheet-home-card-title > span { display: grid; width: 27px; height: 27px; place-items: center; color: #fff; background: #217346; font-size: 9px; font-weight: 800; }
+body[data-theme="sheet"] .sheet-home-card-title p { margin: 0; color: #5e7568; font-size: 8px; font-weight: 800; letter-spacing: .09em; }
+body[data-theme="sheet"] .sheet-home-card-title h2 { margin: 2px 0 0; color: #294537; font-size: 15px; letter-spacing: -.035em; }
+body[data-theme="sheet"] .sheet-home-card label { display: grid; gap: 5px; margin: 0; color: #52675b; font-size: 10px; font-weight: 700; }
+body[data-theme="sheet"] .sheet-home-card input,
+body[data-theme="sheet"] .sheet-home-card select { min-height: 31px; border: 1px solid #bfcac4; border-radius: 0; padding: 0 7px; color: #263b2e; background: #fff; font-size: 10px; }
+body[data-theme="sheet"] .sheet-home-card .code-input { letter-spacing: .16em; }
+body[data-theme="sheet"] .sheet-home-form-two { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+body[data-theme="sheet"] .sheet-home-action { min-height: 31px; border: 1px solid #217346; border-radius: 0; padding: 0 9px; color: #fff; background: #217346; font-size: 10px; font-weight: 800; }
+body[data-theme="sheet"] .sheet-home-action.secondary { color: #216b45; background: #fff; }
+body[data-theme="sheet"] .sheet-home-action:hover { filter: brightness(1.03); }
+body[data-theme="sheet"] .sheet-home-card > p { align-self: end; margin: 0; color: #6c7b73; font-size: 9px; line-height: 1.45; }
+body[data-theme="sheet"] .sheet-home-footer { margin-top: 9px; color: #6c6c6c; font-size: 9px; }
+
+@media (max-width: 860px) {
+  body[data-theme="sheet"] .sheet-home-formula { grid-template-columns: 70px 28px minmax(0,1fr); }
+  body[data-theme="sheet"] .sheet-home-workspace { display: block; min-width: 0; min-height: calc(100dvh - 148px); }
+  body[data-theme="sheet"] .sheet-home-corner,
+  body[data-theme="sheet"] .sheet-home-columns,
+  body[data-theme="sheet"] .sheet-home-rows { display: none; }
+  body[data-theme="sheet"] .sheet-home-canvas { min-height: calc(100dvh - 148px); padding: 25px 14px 42px; }
+  body[data-theme="sheet"] .sheet-home-file-panel { align-items: start; flex-direction: column; gap: 12px; }
+  body[data-theme="sheet"] .sheet-home-cards { grid-template-columns: 1fr; }
+  body[data-theme="sheet"] .sheet-home-card { min-height: 0; border-top: 1px solid #d7dfda; border-left: 0; }
+  body[data-theme="sheet"] .sheet-home-card:first-child { border-top: 0; }
+}
+@media (max-width: 520px) {
+  body[data-theme="sheet"] .sheet-home-formula { height: 32px; grid-template-columns: 58px 24px minmax(0,1fr); }
+  body[data-theme="sheet"] .sheet-home-name-box,
+  body[data-theme="sheet"] .sheet-home-formula-mark,
+  body[data-theme="sheet"] .sheet-home-formula p { margin-top: 3px; margin-bottom: 3px; padding-right: 5px; padding-left: 5px; font-size: 9px; }
+  body[data-theme="sheet"] .sheet-home-file-panel { padding: 13px; }
+  body[data-theme="sheet"] .sheet-home-file-panel dl { width: 100%; }
+  body[data-theme="sheet"] .sheet-home-file-panel dl div { flex: 1; }
+  body[data-theme="sheet"] .sheet-home-form-two { grid-template-columns: 1fr; }
+}

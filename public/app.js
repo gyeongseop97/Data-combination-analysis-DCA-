@@ -55,7 +55,7 @@ function showToast(message, kind = '') {
 }
 
 function theme() {
-  return localStorage.getItem(THEME_KEY) === 'sheet' ? 'sheet' : 'classic';
+  return localStorage.getItem(THEME_KEY) === 'classic' ? 'classic' : 'sheet';
 }
 
 function applyTheme(nextTheme, shouldRender = true) {
@@ -374,7 +374,7 @@ function goHome() {
 }
 
 function spreadsheetHeader() {
-  const documentTitle = `${GAME_TITLE} - Excel`;
+  const documentTitle = GAME_TITLE;
   return `
     <header class="workbook-chrome">
       <div class="workbook-titlebar">
@@ -430,51 +430,101 @@ function header(compact = false) {
 
 function homePage() {
   const code = pendingRoomCode || '';
+  return theme() === 'sheet' ? spreadsheetHomePage(code) : classicHomePage(code);
+}
+
+function classicHomePage(code) {
   return `
     ${header()}
     <main class="home-page">
       <section class="hero-copy">
-        <p class="eyebrow">AI PRACTICE · REAL-TIME MULTIPLAYER</p>
-        <h1>업무 사이,<br><em>조용한 한 판.</em></h1>
-        <p class="hero-text">혼자서는 AI와 바로 연습하고, 친구가 오면 최대 4명까지 실시간으로 즐기는 클래식 루미큐브입니다.</p>
+        <p class="eyebrow">DATA COMBINATION ANALYSIS</p>
+        <h1 class="home-file-title">${escapeHtml(GAME_TITLE)}</h1>
+        <p class="hero-text">개인 분석을 바로 열거나, 공유 분석 세션을 만들어 구성원과 같은 결과를 검토할 수 있습니다.</p>
         <div class="feature-row">
-          <span>실시간 비공개 손패</span><span>첫 등록 30점</span><span>서버 기준 타이머</span>
-        </div>
-        <div class="hero-tiles" aria-hidden="true">
-          <span class="mini-tile red">7</span><span class="mini-tile blue">8</span><span class="mini-tile orange">9</span><span class="mini-tile black">10</span>
+          <span>개인 분석</span><span>공유 세션</span><span>자동 동기화</span>
         </div>
       </section>
       <section class="entry-grid">
         <form id="soloGameForm" class="entry-card solo-card">
-          <div class="card-heading"><span class="step">AI</span><div><p class="eyebrow">SOLO PRACTICE</p><h2>AI와 바로 플레이</h2></div></div>
-          <label>내 이름<input required maxlength="24" name="playerName" autocomplete="nickname" value="나" /></label>
-          <label>턴 제한<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
-          <button class="primary-button" type="submit">AI와 바로 플레이 <span>→</span></button>
-          <p class="field-note">대기실 없이 즉시 시작합니다. AI도 같은 규칙과 서버 판정을 따릅니다.</p>
+          <div class="card-heading"><span class="step">01</span><div><p class="eyebrow">PRIVATE ANALYSIS</p><h2>개인 분석 열기</h2></div></div>
+          <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" value="나" /></label>
+          <label>분석 주기<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
+          <button class="primary-button" type="submit">개인 분석 시작 <span>→</span></button>
+          <p class="field-note">개인 작업 영역이 바로 열립니다. 자동 분석도 같은 기준으로 동작합니다.</p>
         </form>
         <form id="createRoomForm" class="entry-card create-card">
-          <div class="card-heading"><span class="step">01</span><div><p class="eyebrow">HOST A ROOM</p><h2>방 만들기</h2></div></div>
-          <label>내 이름<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 민지" /></label>
-          <label>방 이름<input required maxlength="36" name="name" value="점심 전 한 판" /></label>
+          <div class="card-heading"><span class="step">02</span><div><p class="eyebrow">SHARED ANALYSIS</p><h2>공유 분석 만들기</h2></div></div>
+          <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 민지" /></label>
+          <label>세션 이름<input required maxlength="36" name="name" value="정기 조합 검토" /></label>
           <div class="form-two">
-            <label>최대 인원<select name="maxPlayers"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></label>
-            <label>턴 제한<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
+            <label>검토 인원<select name="maxPlayers"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></label>
+            <label>검토 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
           </div>
-          <button class="primary-button" type="submit">방 만들기 <span>→</span></button>
-          <p class="field-note">방장은 대기실에서 시작 전까지 설정을 바꿀 수 있습니다.</p>
+          <button class="primary-button" type="submit">공유 세션 생성 <span>→</span></button>
+          <p class="field-note">세션을 만들면 검토 코드가 생성됩니다.</p>
         </form>
         <form id="joinRoomForm" class="entry-card join-card">
-          <div class="card-heading"><span class="step">02</span><div><p class="eyebrow">JOIN QUIETLY</p><h2>초대 코드로 참가</h2></div></div>
-          <label>내 이름<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 준" /></label>
-          <label>초대 코드<input required maxlength="6" pattern="[A-Za-z0-9]{6}" name="code" value="${escapeHtml(code)}" placeholder="ABC123" class="code-input" /></label>
-          <button class="secondary-button" type="submit">방 참가하기 <span>→</span></button>
-          <p class="field-note">코드는 방장에게 받으세요. 게임이 시작되면 새 참가자는 들어올 수 없습니다.</p>
+          <div class="card-heading"><span class="step">03</span><div><p class="eyebrow">OPEN WORKSPACE</p><h2>공유 분석 열기</h2></div></div>
+          <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 준" /></label>
+          <label>세션 코드<input required maxlength="6" pattern="[A-Za-z0-9]{6}" name="code" value="${escapeHtml(code)}" placeholder="ABC123" class="code-input" /></label>
+          <button class="secondary-button" type="submit">세션 불러오기 <span>→</span></button>
+          <p class="field-note">공유 받은 6자리 세션 코드를 입력하세요.</p>
         </form>
       </section>
-      <p class="quiet-note">테마는 각자 화면에만 적용됩니다. 누군가는 기본 테마, 누군가는 스프레드시트 테마로 같은 방에 있을 수 있어요.</p>
+      <p class="quiet-note">표시 방식은 각 브라우저에서 개별 설정됩니다.</p>
     </main>`;
 }
 
+function spreadsheetHomePage(code) {
+  const columns = Array.from({ length: 16 }, (_, index) => `<span>${String.fromCharCode(65 + index)}</span>`).join('');
+  const rows = Array.from({ length: 28 }, (_, index) => `<span>${index + 1}</span>`).join('');
+  return `
+    ${header()}
+    <main class="home-page sheet-home-page">
+      <div class="sheet-home-formula" aria-hidden="true"><span class="sheet-home-name-box">C8</span><span class="sheet-home-formula-mark">fx</span><p>=DCA_WORKBOOK("READY")</p></div>
+      <section class="sheet-home-workspace" aria-label="${escapeHtml(GAME_TITLE)} 시작 화면">
+        <div class="sheet-home-corner" aria-hidden="true"></div>
+        <div class="sheet-home-columns" aria-hidden="true">${columns}</div>
+        <div class="sheet-home-rows" aria-hidden="true">${rows}</div>
+        <div class="sheet-home-canvas">
+          <section class="sheet-home-file-panel">
+            <div>
+              <p>DATA COMBINATION ANALYSIS</p>
+              <h1>${escapeHtml(GAME_TITLE)}</h1>
+              <small>통합 문서 · 분석 시트 · 자동 저장됨</small>
+            </div>
+            <dl><div><dt>상태</dt><dd>준비</dd></div><div><dt>버전</dt><dd>v1.0</dd></div><div><dt>표시</dt><dd>100%</dd></div></dl>
+          </section>
+          <section class="sheet-home-cards">
+            <form id="soloGameForm" class="sheet-home-card sheet-home-auto-card">
+              <div class="sheet-home-card-title"><span>01</span><div><p>PRIVATE ANALYSIS</p><h2>개인 분석</h2></div></div>
+              <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" value="나" /></label>
+              <label>분석 주기<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
+              <button class="sheet-home-action" type="submit">분석 시작</button>
+              <p>개인 작업 영역을 바로 엽니다.</p>
+            </form>
+            <form id="createRoomForm" class="sheet-home-card">
+              <div class="sheet-home-card-title"><span>02</span><div><p>SHARED ANALYSIS</p><h2>공유 분석</h2></div></div>
+              <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 민지" /></label>
+              <label>세션 이름<input required maxlength="36" name="name" value="정기 조합 검토" /></label>
+              <div class="sheet-home-form-two"><label>검토 인원<select name="maxPlayers"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></label><label>검토 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label></div>
+              <button class="sheet-home-action" type="submit">공유 세션 생성</button>
+              <p>검토용 세션 코드가 생성됩니다.</p>
+            </form>
+            <form id="joinRoomForm" class="sheet-home-card">
+              <div class="sheet-home-card-title"><span>03</span><div><p>OPEN WORKSPACE</p><h2>기존 분석</h2></div></div>
+              <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 준" /></label>
+              <label>세션 코드<input required maxlength="6" pattern="[A-Za-z0-9]{6}" name="code" value="${escapeHtml(code)}" placeholder="ABC123" class="code-input" /></label>
+              <button class="sheet-home-action secondary" type="submit">세션 불러오기</button>
+              <p>공유 받은 6자리 코드를 입력하세요.</p>
+            </form>
+          </section>
+          <p class="sheet-home-footer">변경 사항은 현재 브라우저에서만 표시됩니다.</p>
+        </div>
+      </section>
+    </main>`;
+}
 function playerRow(player) {
   const initials = escapeHtml(player.name.slice(0, 1).toUpperCase());
   return `
