@@ -5,7 +5,7 @@
   "description": "A discreet, real-time Rummikub game for 2–4 players.",
   "scripts": {
     "start": "node server.js",
-    "build": "node scripts/build-static.js",
+    "build": "vite build",
     "test": "pushd \"%INIT_CWD%\" && node test/run.js"
   },
   "engines": {
@@ -14,5 +14,8 @@
   "dependencies": {
     "@upstash/qstash": "^2.11.3",
     "@upstash/redis": "^1.38.4"
+  },
+  "devDependencies": {
+    "vite": "^8.3.0"
   }
 }
