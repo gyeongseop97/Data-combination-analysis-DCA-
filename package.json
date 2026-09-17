@@ -5,6 +5,7 @@
   "description": "A discreet, real-time Rummikub game for 2–4 players.",
   "scripts": {
     "start": "node server.js",
+    "build": "node scripts/build-static.js",
     "test": "pushd \"%INIT_CWD%\" && node test/run.js"
   },
   "engines": {
