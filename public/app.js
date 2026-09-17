@@ -9,6 +9,8 @@ const colors = ['red', 'blue', 'orange', 'black'];
 const RACK_HOLD_DELAY = 360;
 const RACK_HOLD_STEP = 220;
 const GAME_TITLE = '데이터 조합 분석_v1.xlsx';
+const PUBLIC_ROOM_REFRESH_MS = 12_000;
+const ROOM_STATE_REFRESH_MS = 1_500;
 
 let clientId = localStorage.getItem(CLIENT_KEY);
 if (!clientId) {
@@ -20,6 +22,9 @@ let state = null;
 let activeRoomCode = '';
 let pendingRoomCode = new URLSearchParams(location.search).get('room')?.toUpperCase() || '';
 let eventSource = null;
+let roomStateRefreshTimer = null;
+let roomStateRequestInFlight = false;
+let latestStateDigest = '';
 let selected = null;
 let draft = null;
 let baselineSignature = '';
@@ -36,6 +41,10 @@ let tileHoldStepTimer = null;
 let suppressTileClickUntil = 0;
 let renderSequence = 0;
 let boardFitTimer = null;
+let publicRooms = [];
+let publicRoomsStatus = 'idle';
+let publicRoomsRefreshTimer = null;
+let publicRoomsRequestInFlight = false;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (character) => ({
@@ -69,12 +78,127 @@ function applyTheme(nextTheme, shouldRender = true) {
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
+    credentials: 'same-origin',
     ...options,
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || '요청을 처리하지 못했습니다.');
   return data;
+}
+
+function isHomeView() {
+  return !state || !state.you;
+}
+
+function normalizedPublicRooms() {
+  const entries = Array.isArray(publicRooms) ? publicRooms : [];
+  return entries
+    .map((room) => {
+      if (!room || (room.visibility && room.visibility !== 'public') || (room.phase && room.phase !== 'lobby')) return null;
+      const code = shortCode(room.code);
+      const maxPlayers = Math.max(2, Math.min(4, Math.round(Number(room.maxPlayers) || 4)));
+      const reportedPlayerCount = Number(room.playerCount);
+      const playerCount = Number.isFinite(reportedPlayerCount)
+        ? Math.max(0, Math.min(maxPlayers, Math.round(reportedPlayerCount)))
+        : 0;
+      const reportedOpenSeats = Number(room.openSeats);
+      const openSeats = Number.isFinite(reportedOpenSeats)
+        ? Math.max(0, Math.min(maxPlayers - playerCount, Math.round(reportedOpenSeats)))
+        : maxPlayers - playerCount;
+      const turnSeconds = Math.max(30, Math.round(Number(room.turnSeconds) || 60));
+      return {
+        code,
+        name: String(room.name || '공유 분석').slice(0, 36),
+        maxPlayers,
+        playerCount,
+        openSeats,
+        turnSeconds,
+      };
+    })
+    .filter((room) => room && room.code.length === 6 && room.openSeats > 0);
+}
+
+function publicRoomsStatusLabel() {
+  const count = normalizedPublicRooms().length;
+  if (publicRoomsStatus === 'loading') return '목록 확인 중';
+  if (publicRoomsStatus === 'error') return '연결 확인 필요';
+  if (!count) return '대기 항목 없음';
+  return `대기 ${count}건`;
+}
+
+function publicRoomRowsHtml() {
+  const rooms = normalizedPublicRooms();
+  if (publicRoomsStatus === 'loading' && !rooms.length) {
+    return '<p class="public-room-empty">공개된 분석 대기 항목을 확인하고 있습니다.</p>';
+  }
+  if (publicRoomsStatus === 'error' && !rooms.length) {
+    return '<p class="public-room-empty error">공개 목록을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.</p>';
+  }
+  if (!rooms.length) {
+    return '<p class="public-room-empty">현재 참여할 수 있는 공개 분석이 없습니다.</p>';
+  }
+  return rooms.map((room) => `
+    <article class="public-room-row">
+      <div class="public-room-details">
+        <strong>${escapeHtml(room.name)}</strong>
+        <span>참여 ${room.playerCount}/${room.maxPlayers}명 · 검토 ${room.turnSeconds}초</span>
+      </div>
+      <div class="public-room-action">
+        <small>${room.openSeats}석 여유</small>
+        <button type="button" class="public-room-join" data-action="join-public-room" data-room-code="${escapeHtml(room.code)}">참여</button>
+      </div>
+    </article>`).join('');
+}
+
+function publicLobbyHtml(sheet = false) {
+  return `
+    <section class="public-lobby-section ${sheet ? 'sheet-public-lobby' : ''}" aria-label="공개 분석 대기 목록">
+      <header class="public-lobby-heading">
+        <div><p>SHARED QUEUE</p><h2>공개 분석 대기</h2></div>
+        <div class="public-lobby-heading-actions"><span data-public-room-status>${escapeHtml(publicRoomsStatusLabel())}</span><button type="button" class="public-lobby-refresh" data-action="refresh-public-rooms">새로 고침</button></div>
+      </header>
+      <div class="public-lobby-identity"><label>분석자<input data-public-player-name maxlength="24" autocomplete="nickname" placeholder="예: 민지" /></label><p>참여할 공개 분석을 선택하기 전에 이름을 입력하세요.</p></div>
+      <div class="public-room-list" data-public-room-list aria-live="polite">${publicRoomRowsHtml()}</div>
+      <p class="public-lobby-note">공개로 설정된 대기 항목만 표시됩니다. 초대 전용 항목은 코드로만 열 수 있습니다.</p>
+    </section>`;
+}
+
+function renderPublicRoomsOnly() {
+  const list = document.querySelector('[data-public-room-list]');
+  if (list) list.innerHTML = publicRoomRowsHtml();
+  const status = document.querySelector('[data-public-room-status]');
+  if (status) status.textContent = publicRoomsStatusLabel();
+}
+
+async function refreshPublicRooms() {
+  if (!isHomeView() || publicRoomsRequestInFlight) return;
+  publicRoomsRequestInFlight = true;
+  if (!publicRooms.length) {
+    publicRoomsStatus = 'loading';
+    renderPublicRoomsOnly();
+  }
+  try {
+    const response = await api('/api/rooms?scope=public&phase=lobby&limit=20');
+    publicRooms = Array.isArray(response.rooms) ? response.rooms : [];
+    publicRoomsStatus = 'ready';
+  } catch {
+    publicRoomsStatus = publicRooms.length ? 'stale' : 'error';
+  } finally {
+    publicRoomsRequestInFlight = false;
+    if (isHomeView()) renderPublicRoomsOnly();
+  }
+}
+
+function syncPublicRoomsRefresh() {
+  if (!isHomeView()) {
+    if (publicRoomsRefreshTimer) clearInterval(publicRoomsRefreshTimer);
+    publicRoomsRefreshTimer = null;
+    return;
+  }
+  if (publicRoomsRefreshTimer) return;
+  void refreshPublicRooms();
+  publicRoomsRefreshTimer = setInterval(() => { void refreshPublicRooms(); }, PUBLIC_ROOM_REFRESH_MS);
 }
 
 function draftSignature(model) {
@@ -317,6 +441,12 @@ function syncDraftStatus() {
   }, 120);
 }
 
+function stateDigest(snapshot) {
+  if (!snapshot) return '';
+  const { serverNow: _serverNow, ...stableState } = snapshot;
+  return JSON.stringify(stableState);
+}
+
 function receiveState(nextState) {
   const keepDraft = Boolean(
     draft
@@ -324,22 +454,44 @@ function receiveState(nextState) {
     && nextState.turn.deadlineAt === draftTurnKey,
   );
   state = nextState;
+  latestStateDigest = stateDigest(nextState);
   if (!keepDraft) hydrateDraft(nextState);
   render();
 }
 
-function connectEvents(code) {
-  if (eventSource) eventSource.close();
-  connection = 'connecting';
-  eventSource = new EventSource(`/api/rooms/${code}/events?clientId=${encodeURIComponent(clientId)}`);
-  eventSource.addEventListener('state', (event) => {
+function stopRoomStateRefresh() {
+  if (roomStateRefreshTimer) clearInterval(roomStateRefreshTimer);
+  roomStateRefreshTimer = null;
+  roomStateRequestInFlight = false;
+}
+
+async function refreshRoomState() {
+  if (!activeRoomCode || roomStateRequestInFlight) return;
+  roomStateRequestInFlight = true;
+  try {
+    const snapshot = await api(`/api/rooms/${activeRoomCode}?clientId=${encodeURIComponent(clientId)}`);
     connection = 'online';
-    receiveState(JSON.parse(event.data));
-  });
-  eventSource.onerror = () => {
+    if (stateDigest(snapshot) !== latestStateDigest) receiveState(snapshot);
+    else renderConnectionOnly();
+  } catch {
     connection = 'reconnecting';
     renderConnectionOnly();
-  };
+  } finally {
+    roomStateRequestInFlight = false;
+  }
+}
+
+function connectEvents(code) {
+  // Vercel functions can be resumed on a different instance after reconnecting.
+  // Pulling a private room snapshot keeps every client authoritative and avoids
+  // putting racks or deck data onto a broadcast channel.
+  eventSource?.close();
+  eventSource = null;
+  stopRoomStateRefresh();
+  connection = 'connecting';
+  renderConnectionOnly();
+  void refreshRoomState();
+  roomStateRefreshTimer = setInterval(() => { void refreshRoomState(); }, ROOM_STATE_REFRESH_MS);
 }
 
 function renderConnectionOnly() {
@@ -358,10 +510,26 @@ function activateRoom(code, snapshot) {
   connectEvents(code);
 }
 
+function leaveLobbySilently(code) {
+  if (!code) return;
+  void api(`/api/rooms/${code}/leave`, {
+    method: 'POST',
+    body: JSON.stringify({ clientId }),
+  }).then(() => {
+    if (isHomeView()) void refreshPublicRooms();
+  }).catch(() => {
+    // Leaving is best-effort: a stale local server or a lost connection must not trap the UI.
+  });
+}
+
 function goHome() {
+  const codeToLeave = activeRoomCode;
+  const shouldReleaseLobbySeat = Boolean(state?.you && state?.room?.phase === 'lobby');
   clearBatchSelection();
   eventSource?.close();
   eventSource = null;
+  stopRoomStateRefresh();
+  latestStateDigest = '';
   state = null;
   draft = null;
   selected = null;
@@ -371,6 +539,7 @@ function goHome() {
   localStorage.removeItem(ROOM_KEY);
   history.replaceState(null, '', location.pathname);
   render();
+  if (shouldReleaseLobbySeat) leaveLobbySilently(codeToLeave);
 }
 
 function spreadsheetHeader() {
@@ -461,6 +630,11 @@ function classicHomePage(code) {
             <label>검토 인원<select name="maxPlayers"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></label>
             <label>검토 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
           </div>
+          <div class="visibility-options" role="group" aria-label="공유 범위">
+            <span class="visibility-options-label">공유 범위</span>
+            <label><input type="radio" name="visibility" value="invite" checked />초대 전용</label>
+            <label><input type="radio" name="visibility" value="public" />공개 대기</label>
+          </div>
           <button class="primary-button" type="submit">공유 세션 생성 <span>→</span></button>
           <p class="field-note">세션을 만들면 검토 코드가 생성됩니다.</p>
         </form>
@@ -472,6 +646,7 @@ function classicHomePage(code) {
           <p class="field-note">공유 받은 6자리 세션 코드를 입력하세요.</p>
         </form>
       </section>
+      ${publicLobbyHtml()}
       <p class="quiet-note">표시 방식은 각 브라우저에서 개별 설정됩니다.</p>
     </main>`;
 }
@@ -509,6 +684,7 @@ function spreadsheetHomePage(code) {
               <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 민지" /></label>
               <label>세션 이름<input required maxlength="36" name="name" value="정기 조합 검토" /></label>
               <div class="sheet-home-form-two"><label>검토 인원<select name="maxPlayers"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></label><label>검토 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label></div>
+              <div class="visibility-options sheet-home-visibility" role="group" aria-label="공유 범위"><span class="visibility-options-label">공유 범위</span><label><input type="radio" name="visibility" value="invite" checked />초대 전용</label><label><input type="radio" name="visibility" value="public" />공개 대기</label></div>
               <button class="sheet-home-action" type="submit">공유 세션 생성</button>
               <p>검토용 세션 코드가 생성됩니다.</p>
             </form>
@@ -520,6 +696,7 @@ function spreadsheetHomePage(code) {
               <p>공유 받은 6자리 코드를 입력하세요.</p>
             </form>
           </section>
+          ${publicLobbyHtml(true)}
           <p class="sheet-home-footer">변경 사항은 현재 브라우저에서만 표시됩니다.</p>
         </div>
       </section>
@@ -834,6 +1011,7 @@ function render() {
   fitBoardDensity();
   restoreScrollState(scrollState, sequence);
   syncWorksheetHeaders();
+  syncPublicRoomsRefresh();
 }
 
 function syncWorksheetHeaders() {
@@ -1104,6 +1282,7 @@ async function createRoom(form) {
         name: data.get('name'),
         maxPlayers: data.get('maxPlayers'),
         turnSeconds: data.get('turnSeconds'),
+        visibility: data.get('visibility') || 'invite',
       }),
     });
     activateRoom(response.roomCode, response.state);
@@ -1130,6 +1309,37 @@ async function joinRoom(form) {
   }
 }
 
+async function joinPublicRoom(button) {
+  const code = shortCode(button.dataset.roomCode);
+  const nameInput = document.querySelector('[data-public-player-name]');
+  const playerName = String(nameInput?.value || '').trim();
+  if (!code) {
+    showToast('선택한 분석 항목을 확인할 수 없습니다.', 'error');
+    return;
+  }
+  if (!playerName) {
+    nameInput?.focus();
+    showToast('참여할 분석자 이름을 입력해 주세요.', 'error');
+    return;
+  }
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = '확인 중';
+  try {
+    const response = await api(`/api/rooms/${code}/join`, {
+      method: 'POST',
+      body: JSON.stringify({ clientId, playerName }),
+    });
+    activateRoom(code, response.state);
+  } catch (error) {
+    showToast(error.message, 'error');
+    void refreshPublicRooms();
+    if (isHomeView() && button.isConnected) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
+}
 async function saveSettings(form) {
   const data = new FormData(form);
   try {
@@ -1305,10 +1515,25 @@ document.addEventListener('click', (event) => {
   if (action === 'submit-turn') submitTurn();
   if (action === 'draw-tile') drawTile();
   if (action === 'sort-rack') sortRack(button.dataset.sort);
+  if (action === 'refresh-public-rooms') void refreshPublicRooms();
+  if (action === 'join-public-room') void joinPublicRoom(button);
 });
+
+async function ensureGuestSession() {
+  try {
+    const session = await api('/api/session', { method: 'POST', body: '{}' });
+    if (/^guest-[a-f0-9]{32}$/.test(String(session.clientId || ''))) {
+      clientId = session.clientId;
+      localStorage.setItem(CLIENT_KEY, clientId);
+    }
+  } catch {
+    // A legacy local server can continue with its existing browser identifier.
+  }
+}
 
 async function init() {
   applyTheme(theme(), false);
+  await ensureGuestSession();
   const saved = localStorage.getItem(ROOM_KEY);
   const code = pendingRoomCode || saved;
   if (code) {

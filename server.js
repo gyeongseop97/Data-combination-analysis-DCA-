@@ -14,6 +14,18 @@ const COLOR_ORDER = Object.fromEntries(COLORS.map((color, index) => [color, inde
 const rooms = new Map();
 const listeners = new Map();
 
+// The local server keeps timers and SSE listeners in memory. Vercel functions
+// switch to durable mode and persist only serializable room state in Redis.
+let runtimeOptions = { durable: false };
+
+function configureGameRuntime(options = {}) {
+  runtimeOptions = { ...runtimeOptions, ...options };
+}
+
+function isDurableRuntime() {
+  return Boolean(runtimeOptions.durable);
+}
+
 const TILE_CATALOG = new Map();
 for (const color of COLORS) {
   for (let value = 1; value <= 13; value += 1) {
@@ -159,7 +171,9 @@ function roomView(room, viewerId) {
       maxPlayers: room.maxPlayers,
       turnSeconds: room.turnSeconds,
       mode: room.mode || 'multiplayer',
+      visibility: room.visibility || (room.mode === 'solo' ? 'private' : 'invite'),
       phase: room.phase,
+      revision: Number(room.revision || 0),
       hostId: room.hostId,
       players: room.players.map((player) => publicPlayer(room, player, viewerId)),
     },
@@ -205,10 +219,13 @@ function broadcast(room) {
 }
 
 function clearTurnTimer(room) {
-  if (room.turnTimer) clearTimeout(room.turnTimer);
-  if (room.aiTimer) clearTimeout(room.aiTimer);
+  if (!isDurableRuntime()) {
+    if (room.turnTimer) clearTimeout(room.turnTimer);
+    if (room.aiTimer) clearTimeout(room.aiTimer);
+  }
   room.turnTimer = null;
   room.aiTimer = null;
+  room.aiDueAt = null;
 }
 
 function drawTiles(room, player, amount) {
@@ -296,7 +313,9 @@ function beginTurn(room, index) {
   const player = activePlayer(room);
   log(room, player.isBot ? `${player.name}가 수를 계산 중입니다.` : `${player.name}님의 턴입니다.`);
   const deadline = room.deadlineAt;
-  room.turnTimer = setTimeout(() => expireTurn(room, deadline), room.turnSeconds * 1000 + 25);
+  if (!isDurableRuntime()) {
+    room.turnTimer = setTimeout(() => expireTurn(room, deadline), room.turnSeconds * 1000 + 25);
+  }
   broadcast(room);
   if (player.isBot) scheduleAiTurn(room, player.id, deadline);
 }
@@ -429,26 +448,63 @@ function buildAiMove(room, player) {
   return null;
 }
 
+function resolveAiTurn(room, expectedPlayerId, expectedDeadline) {
+  if (room.phase !== 'playing' || room.deadlineAt !== expectedDeadline) return false;
+  const bot = activePlayer(room);
+  if (!bot || !bot.isBot || bot.id !== expectedPlayerId) return false;
+  room.aiDueAt = null;
+  try {
+    const move = buildAiMove(room, bot);
+    if (move) {
+      commitMove(room, bot.id, move);
+      return true;
+    }
+  } catch (error) {
+    console.warn(`AI move rejected: ${error.message}`);
+  }
+  clearTurnTimer(room);
+  log(room, `${bot.name}가 둘 수 없어 타일을 뽑습니다.`);
+  resolveNoTileDraw(room, bot, 'draw');
+  return true;
+}
+
 function scheduleAiTurn(room, expectedPlayerId, expectedDeadline) {
+  room.aiDueAt = Date.now() + 720;
+  if (isDurableRuntime()) return;
   if (room.aiTimer) clearTimeout(room.aiTimer);
   room.aiTimer = setTimeout(() => {
     room.aiTimer = null;
-    if (room.phase !== 'playing' || room.deadlineAt !== expectedDeadline) return;
-    const bot = activePlayer(room);
-    if (!bot || !bot.isBot || bot.id !== expectedPlayerId) return;
-    try {
-      const move = buildAiMove(room, bot);
-      if (move) {
-        commitMove(room, bot.id, move);
-        return;
-      }
-    } catch (error) {
-      console.warn(`AI move rejected: ${error.message}`);
-    }
-    clearTurnTimer(room);
-    log(room, `${bot.name}가 둘 수 없어 타일을 뽑습니다.`);
-    resolveNoTileDraw(room, bot, 'draw');
+    resolveAiTurn(room, expectedPlayerId, expectedDeadline);
   }, 720);
+}
+
+function advanceRoom(room, now = Date.now()) {
+  if (room.phase !== 'playing') return false;
+  if (Number(room.deadlineAt) && now >= room.deadlineAt) {
+    expireTurn(room, room.deadlineAt);
+    return true;
+  }
+  const bot = activePlayer(room);
+  if (bot?.isBot && Number(room.aiDueAt) && now >= room.aiDueAt) {
+    return resolveAiTurn(room, bot.id, room.deadlineAt);
+  }
+  return false;
+}
+
+function processScheduledEvent(room, event, now = Date.now()) {
+  if (!event || room.phase !== 'playing') return false;
+  if (event.kind === 'turn') {
+    if (Number(event.dueAt) !== Number(room.deadlineAt) || now < Number(event.dueAt)) return false;
+    expireTurn(room, room.deadlineAt);
+    return true;
+  }
+  if (event.kind === 'ai') {
+    const bot = activePlayer(room);
+    if (!bot?.isBot || bot.id !== event.playerId) return false;
+    if (Number(event.dueAt) !== Number(room.aiDueAt) || Number(event.deadlineAt) !== Number(room.deadlineAt) || now < Number(event.dueAt)) return false;
+    return resolveAiTurn(room, bot.id, room.deadlineAt);
+  }
+  return false;
 }
 
 function sameSet(a, b) {
@@ -658,9 +714,34 @@ function requireRoom(code) {
   return room;
 }
 
+function publicRoomSummary(room) {
+  return {
+    code: room.code,
+    name: room.name,
+    maxPlayers: room.maxPlayers,
+    playerCount: room.players.length,
+    openSeats: Math.max(0, room.maxPlayers - room.players.length),
+    turnSeconds: room.turnSeconds,
+    visibility: 'public',
+    phase: 'lobby',
+    createdAt: room.createdAt,
+    updatedAt: room.updatedAt,
+  };
+}
+
+function listPublicRooms(limit = 20) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 50));
+  return [...rooms.values()]
+    .filter((room) => room.visibility === 'public' && room.mode === 'multiplayer' && room.phase === 'lobby' && room.players.length < room.maxPlayers)
+    .sort((left, right) => Number(right.updatedAt || right.createdAt || 0) - Number(left.updatedAt || left.createdAt || 0))
+    .slice(0, safeLimit)
+    .map(publicRoomSummary);
+}
+
 function createRoom(payload) {
   const clientId = cleanClientId(payload.clientId);
   const solo = payload.mode === 'solo';
+  const now = Date.now();
   const host = { id: clientId, name: cleanName(payload.playerName, solo ? '나' : '방장'), rack: [], hasOpened: false, isBot: false };
   const room = {
     code: roomCode(),
@@ -668,6 +749,10 @@ function createRoom(payload) {
     maxPlayers: solo ? 2 : maxPlayers(payload.maxPlayers || 4),
     turnSeconds: turnSeconds(payload.turnSeconds || 60),
     mode: solo ? 'solo' : 'multiplayer',
+    visibility: solo ? 'private' : payload.visibility === 'public' ? 'public' : 'invite',
+    createdAt: now,
+    updatedAt: now,
+    revision: 0,
     hostId: clientId,
     phase: 'lobby',
     players: [host],
@@ -677,6 +762,7 @@ function createRoom(payload) {
     deadlineAt: null,
     turnTimer: null,
     aiTimer: null,
+    aiDueAt: null,
     turnDirty: false,
     emptyPoolPasses: 0,
     result: null,
@@ -710,6 +796,21 @@ function joinRoom(room, payload) {
   log(room, `${player.name}님이 참가했습니다.`);
   broadcast(room);
   return player;
+}
+
+function leaveRoom(room, clientId) {
+  if (room.phase !== 'lobby') return { left: false, reason: 'already-started' };
+  const index = room.players.findIndex((player) => player.id === clientId);
+  if (index < 0) return { left: false, reason: 'not-member' };
+  room.players.splice(index, 1);
+  if (!room.players.length) {
+    rooms.delete(room.code);
+    return { left: true, deleted: true };
+  }
+  if (room.hostId === clientId) room.hostId = room.players[0].id;
+  log(room, '참가자가 대기실을 나갔습니다.');
+  broadcast(room);
+  return { left: true, deleted: false };
 }
 
 function updateSettings(room, clientId, payload) {
@@ -752,8 +853,8 @@ function action(room, clientId, payload) {
   }
 }
 
-function sendJson(response, status, body) {
-  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+function sendJson(response, status, body, headers = {}) {
+  response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   response.end(JSON.stringify(body));
 }
 
@@ -818,12 +919,22 @@ function serveStatic(response, pathname) {
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
   try {
+    if (request.method === 'POST' && url.pathname === '/api/session') {
+      const { issueSession } = require('./lib/session');
+      const issued = issueSession(request);
+      sendJson(response, 200, { clientId: issued.session.id }, issued.cookie ? { 'Set-Cookie': issued.cookie } : {});
+      return;
+    }
+    if (request.method === 'GET' && url.pathname === '/api/rooms' && url.searchParams.get('scope') === 'public') {
+      sendJson(response, 200, { rooms: listPublicRooms(url.searchParams.get('limit')) });
+      return;
+    }
     if (request.method === 'POST' && url.pathname === '/api/rooms') {
       const room = createRoom(await readJson(request));
       sendJson(response, 201, { roomCode: room.code, state: roomView(room, room.hostId) });
       return;
     }
-    const match = url.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)(?:\/(join|settings|start|action|events))?$/i);
+    const match = url.pathname.match(/^\/api\/rooms\/([A-Z0-9]+)(?:\/(join|leave|settings|start|action|events))?$/i);
     if (match) {
       const room = requireRoom(match[1]);
       const endpoint = match[2] || '';
@@ -841,6 +952,12 @@ const server = http.createServer(async (request, response) => {
         const payload = await readJson(request);
         const player = joinRoom(room, payload);
         sendJson(response, 200, { player, state: roomView(room, player.id) });
+        return;
+      }
+      if (request.method === 'POST' && endpoint === 'leave') {
+        const payload = await readJson(request);
+        const id = cleanClientId(payload.clientId);
+        sendJson(response, 200, leaveRoom(room, id));
         return;
       }
       if (request.method === 'POST' && endpoint === 'settings') {
@@ -868,7 +985,27 @@ const server = http.createServer(async (request, response) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Office Rummikub is running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`Office Rummikub is running at http://localhost:${PORT}`);
+  });
+}
 
+module.exports = {
+  ALL_TILE_IDS,
+  TILE_CATALOG,
+  action,
+  advanceRoom,
+  configureGameRuntime,
+  createRoom,
+  joinRoom,
+  leaveRoom,
+  listPublicRooms,
+  processScheduledEvent,
+  publicRoomSummary,
+  requireRoom,
+  roomView,
+  rooms,
+  server,
+  updateSettings,
+};
