@@ -5,6 +5,7 @@ const ROOM_KEY = 'office-rummikub-room';
 const CLIENT_KEY = 'office-rummikub-client';
 const THEME_KEY = 'office-rummikub-theme';
 const RACK_ORDER_PREFIX = 'office-rummikub-rack-order';
+const SOLO_SESSION_KEY = 'office-rummikub-solo-session';
 const colors = ['red', 'blue', 'orange', 'black'];
 const RACK_HOLD_DELAY = 360;
 const RACK_HOLD_STEP = 220;
@@ -21,6 +22,7 @@ if (!clientId) {
 let state = null;
 let activeRoomCode = '';
 let pendingRoomCode = new URLSearchParams(location.search).get('room')?.toUpperCase() || '';
+let soloSessionToken = '';
 let eventSource = null;
 let roomStateRefreshTimer = null;
 let roomStateRequestInFlight = false;
@@ -85,6 +87,26 @@ async function api(path, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || '요청을 처리하지 못했습니다.');
   return data;
+}
+
+function isStatelessSolo() {
+  return Boolean(soloSessionToken && state?.room?.mode === 'solo');
+}
+
+function forgetSoloSession() {
+  soloSessionToken = '';
+  localStorage.removeItem(SOLO_SESSION_KEY);
+}
+
+async function soloApi(action, payload = {}) {
+  const response = await api('/api/solo', {
+    method: 'POST',
+    body: JSON.stringify({ action, ...(soloSessionToken ? { token: soloSessionToken } : {}), ...payload }),
+  });
+  if (!response?.token || !response?.state) throw new Error('개인 분석 세션 응답이 올바르지 않습니다.');
+  soloSessionToken = response.token;
+  localStorage.setItem(SOLO_SESSION_KEY, soloSessionToken);
+  return response.state;
 }
 
 function isHomeView() {
@@ -491,7 +513,7 @@ function isDraftDirty() {
 }
 
 function syncDraftStatus() {
-  if (!state?.turn?.isYourTurn) return;
+  if (!state?.turn?.isYourTurn || isStatelessSolo()) return;
   clearTimeout(draftSyncTimer);
   draftSyncTimer = setTimeout(async () => {
     try {
@@ -534,7 +556,9 @@ async function refreshRoomState() {
   if (!activeRoomCode || roomStateRequestInFlight) return;
   roomStateRequestInFlight = true;
   try {
-    const snapshot = await api(`/api/rooms/${activeRoomCode}?clientId=${encodeURIComponent(clientId)}`);
+    const snapshot = isStatelessSolo()
+      ? await soloApi('state')
+      : await api(`/api/rooms/${activeRoomCode}?clientId=${encodeURIComponent(clientId)}`);
     connection = 'online';
     if (stateDigest(snapshot) !== latestStateDigest) receiveState(snapshot);
     else renderConnectionOnly();
@@ -567,12 +591,22 @@ function renderConnectionOnly() {
 }
 
 function activateRoom(code, snapshot) {
+  forgetSoloSession();
   activeRoomCode = code;
   pendingRoomCode = '';
   localStorage.setItem(ROOM_KEY, code);
   history.replaceState(null, '', `?room=${encodeURIComponent(code)}`);
   receiveState(snapshot);
   connectEvents(code);
+}
+
+function activateSolo(snapshot) {
+  activeRoomCode = snapshot.room.code;
+  pendingRoomCode = '';
+  localStorage.removeItem(ROOM_KEY);
+  history.replaceState(null, '', location.pathname);
+  receiveState(snapshot);
+  connectEvents(activeRoomCode);
 }
 
 function leaveLobbySilently(code) {
@@ -601,6 +635,7 @@ function goHome() {
   activeRoomCode = '';
   pendingRoomCode = '';
   connection = 'idle';
+  forgetSoloSession();
   localStorage.removeItem(ROOM_KEY);
   history.replaceState(null, '', location.pathname);
   render();
@@ -1291,15 +1326,15 @@ async function submitTurn() {
   if (!draft || !isDraftDirty()) return;
   sortDraftMelds();
   try {
-    const response = await api(`/api/rooms/${activeRoomCode}/action`, {
-      method: 'POST',
-      body: JSON.stringify({
-        clientId,
-        action: 'submit',
-        board: draft.groups.map((group) => ({ id: group.id, tileIds: group.tiles.map((tile) => tile.id) })),
-        rackIds: draft.rack.map((tile) => tile.id),
-      }),
-    });
+    const action = {
+      clientId,
+      action: 'submit',
+      board: draft.groups.map((group) => ({ id: group.id, tileIds: group.tiles.map((tile) => tile.id) })),
+      rackIds: draft.rack.map((tile) => tile.id),
+    };
+    const response = isStatelessSolo()
+      ? await soloApi('action', { payload: action })
+      : await api(`/api/rooms/${activeRoomCode}/action`, { method: 'POST', body: JSON.stringify(action) });
     receiveState(response);
   } catch (error) {
     showToast(error.message, 'error');
@@ -1309,10 +1344,10 @@ async function submitTurn() {
 async function drawTile() {
   if (!state?.turn?.isYourTurn) return;
   try {
-    const response = await api(`/api/rooms/${activeRoomCode}/action`, {
-      method: 'POST',
-      body: JSON.stringify({ clientId, action: 'draw' }),
-    });
+    const action = { clientId, action: 'draw' };
+    const response = isStatelessSolo()
+      ? await soloApi('action', { payload: action })
+      : await api(`/api/rooms/${activeRoomCode}/action`, { method: 'POST', body: JSON.stringify(action) });
     receiveState(response);
   } catch (error) {
     showToast(error.message, 'error');
@@ -1324,20 +1359,25 @@ async function startSoloGame(form = null, replay = null) {
   const playerName = data ? data.get('playerName') : replay?.playerName || state?.you?.name || '나';
   const turnSeconds = data ? data.get('turnSeconds') : replay?.turnSeconds || state?.room?.turnSeconds || 60;
   try {
-    const response = await api('/api/rooms', {
-      method: 'POST',
-      body: JSON.stringify({
-        clientId,
-        playerName,
-        name: 'AI 연습전',
-        maxPlayers: 2,
-        turnSeconds,
-        mode: 'solo',
-      }),
-    });
-    activateRoom(response.roomCode, response.state);
+    forgetSoloSession();
+    const snapshot = await soloApi('create', { playerName, turnSeconds });
+    activateSolo(snapshot);
   } catch (error) {
-    showToast(error.message, 'error');
+    // The dependency-free API is available on Vercel. Keep the bundled local
+    // server convenient for offline development until it exposes this route.
+    if (!/찾을 수 없는 요청/.test(error.message)) {
+      showToast(error.message, 'error');
+      return;
+    }
+    try {
+      const response = await api('/api/rooms', {
+        method: 'POST',
+        body: JSON.stringify({ clientId, playerName, name: 'AI 연습전', maxPlayers: 2, turnSeconds, mode: 'solo' }),
+      });
+      activateRoom(response.roomCode, response.state);
+    } catch (fallbackError) {
+      showToast(fallbackError.message, 'error');
+    }
   }
 }
 
@@ -1604,6 +1644,17 @@ async function ensureGuestSession() {
 async function init() {
   applyTheme(theme(), false);
   await ensureGuestSession();
+  const savedSolo = pendingRoomCode ? '' : localStorage.getItem(SOLO_SESSION_KEY);
+  if (savedSolo) {
+    soloSessionToken = savedSolo;
+    try {
+      const snapshot = await soloApi('state');
+      activateSolo(snapshot);
+      return;
+    } catch {
+      forgetSoloSession();
+    }
+  }
   const saved = localStorage.getItem(ROOM_KEY);
   const code = pendingRoomCode || saved;
   if (code) {
