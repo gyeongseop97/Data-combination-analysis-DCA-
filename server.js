@@ -200,6 +200,7 @@ function roomView(room, viewerId) {
     result: room.result || null,
     log: room.log,
     recentSubmissions: (room.recentSubmissions || []).map(serializeRecentSubmission),
+    lastDrawTileId: room.lastDraw?.playerId === viewerId ? room.lastDraw.tileId : null,
   };
 }
 
@@ -276,6 +277,9 @@ function resolveNoTileDraw(room, player, source) {
   if (room.deck.length > 0) {
     const count = source === 'timeout' && room.turnDirty ? 3 : 1;
     const drawn = drawTiles(room, player, count);
+    if (source === 'draw' && drawn.length) {
+      room.lastDraw = { playerId: player.id, tileId: drawn[drawn.length - 1], at: Date.now() };
+    }
     log(room, source === 'timeout'
       ? `${player.name}님의 시간이 끝나 타일 ${drawn.length}장을 받았습니다.`
       : `${player.name}님이 타일 ${drawn.length}장을 뽑고 턴을 마쳤습니다.`);
@@ -325,6 +329,7 @@ function startGame(room) {
   room.board = [];
   room.result = null;
   room.recentSubmissions = [];
+  room.lastDraw = null;
   room.emptyPoolPasses = 0;
   for (const player of room.players) {
     player.rack = room.deck.splice(0, 14);
@@ -705,6 +710,7 @@ function commitMove(room, clientId, payload) {
   room.board = normalized;
   player.rack = submittedRack;
   recordSubmission(room, player, playedRackTileIds, normalized);
+  if (room.lastDraw?.playerId === player.id) room.lastDraw = null;
   room.turnDirty = false;
   room.emptyPoolPasses = 0;
   if (player.rack.length === 0) {
@@ -774,6 +780,7 @@ function createRoom(payload) {
     result: null,
     log: [],
     recentSubmissions: [],
+    lastDraw: null,
   };
   if (solo) {
     room.players.push({

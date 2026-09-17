@@ -35,6 +35,7 @@ let draftSyncTimer = null;
 let toastTimer = null;
 let connection = 'idle';
 let draggedTile = null;
+let touchDrag = null;
 let lastDragAt = 0;
 let batchSelection = null;
 let tileHold = null;
@@ -325,7 +326,7 @@ function batchMatches(source, groupId, tileId) {
 function batchStatusText(selection = batchSelection) {
   if (!selection?.tileIds?.length) return '';
   return selection.source === 'group'
-    ? `보드 뒤쪽 패 ${selection.tileIds.length}장 선택됨 · 드래그하면 함께 이동합니다`
+    ? `이어진 보드 패 ${selection.tileIds.length}장 선택됨 · 드래그하면 함께 이동합니다`
     : `조합 가능 패 ${selection.tileIds.length}장 선택됨 · 드래그하면 함께 이동합니다`;
 }
 
@@ -388,40 +389,42 @@ function setBatchSelection(source, groupId, tileIds) {
   paintBatchSelection();
 }
 
-function rackConsecutiveTileIds(tileId) {
-  if (!draft) return [];
-  const startIndex = draft.rack.findIndex((tile) => tile.id === tileId);
+function compatibleTileIds(tiles, tileId) {
+  const startIndex = tiles.findIndex((tile) => tile.id === tileId);
   if (startIndex < 0) return [];
-  const first = draft.rack[startIndex];
-  if (first.kind === 'joker') return [];
+  const first = tiles[startIndex];
+  const firstFace = knownTileFace(first);
+  if (!firstFace) return [];
 
-  const second = draft.rack[startIndex + 1];
-  if (!second || second.kind === 'joker') return [first.id];
+  const second = tiles[startIndex + 1];
+  const secondFace = knownTileFace(second);
+  if (!secondFace) return [first.id];
 
-  if (second.value === first.value && second.color !== first.color) {
+  if (Number(secondFace.value) === Number(firstFace.value) && secondFace.color !== firstFace.color) {
     const ids = [first.id];
-    const usedColors = new Set([first.color]);
-    for (let index = startIndex + 1; index < draft.rack.length; index += 1) {
-      const next = draft.rack[index];
-      if (next.kind === 'joker' || next.value !== first.value || usedColors.has(next.color)) break;
+    const usedColors = new Set([firstFace.color]);
+    for (let index = startIndex + 1; index < tiles.length; index += 1) {
+      const next = tiles[index];
+      const nextFace = knownTileFace(next);
+      if (!nextFace || Number(nextFace.value) !== Number(firstFace.value) || usedColors.has(nextFace.color)) break;
       ids.push(next.id);
-      usedColors.add(next.color);
+      usedColors.add(nextFace.color);
     }
-    // A same-number set is only a playable meld when it has three different colors.
-    return ids.length >= 3 ? ids : [first.id];
+    return ids;
   }
 
-  if (second.color !== first.color || Math.abs(Number(second.value) - Number(first.value)) !== 1) {
+  if (secondFace.color !== firstFace.color || Math.abs(Number(secondFace.value) - Number(firstFace.value)) !== 1) {
     return [first.id];
   }
 
   const ids = [first.id];
-  let previous = first;
+  let previousFace = firstFace;
   let direction = 0;
-  for (let index = startIndex + 1; index < draft.rack.length; index += 1) {
-    const next = draft.rack[index];
-    if (next.kind === 'joker' || next.color !== previous.color) break;
-    const difference = Number(next.value) - Number(previous.value);
+  for (let index = startIndex + 1; index < tiles.length; index += 1) {
+    const next = tiles[index];
+    const nextFace = knownTileFace(next);
+    if (!nextFace || nextFace.color !== previousFace.color) break;
+    const difference = Number(nextFace.value) - Number(previousFace.value);
     if (!direction) {
       if (Math.abs(difference) !== 1) break;
       direction = difference;
@@ -429,17 +432,20 @@ function rackConsecutiveTileIds(tileId) {
       break;
     }
     ids.push(next.id);
-    previous = next;
+    previousFace = nextFace;
   }
   return ids;
+}
+
+function rackConsecutiveTileIds(tileId) {
+  return draft ? compatibleTileIds(draft.rack, tileId) : [];
 }
 
 function groupTailTileIds(groupId, tileId) {
   if (!draft) return [];
   const group = draft.groups.find((entry) => entry.id === groupId);
   if (!group || (group.existing && !state?.you?.hasOpened)) return [];
-  const startIndex = group.tiles.findIndex((tile) => tile.id === tileId);
-  return startIndex < 0 ? [] : group.tiles.slice(startIndex).map((tile) => tile.id);
+  return compatibleTileIds(group.tiles, tileId);
 }
 
 function holdCandidateTileIds(source, groupId, tileId) {
@@ -452,11 +458,26 @@ function beginTileHold(tile, event) {
   const source = tile.dataset.source;
   const groupId = tile.dataset.groupId || '';
   const tileIds = holdCandidateTileIds(source, groupId, tile.dataset.tileId);
-  if (tileIds.length < 2) return;
+  if (tileIds.length < 2) {
+    tileHold = {
+      pointerId: event.pointerId,
+      element: tile,
+      source,
+      groupId,
+      anchorTileId: tile.dataset.tileId,
+      tileIds: [tile.dataset.tileId],
+      selectedCount: 0,
+      active: false,
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    return;
+  }
 
   clearBatchSelection();
   tileHold = {
     pointerId: event.pointerId,
+    element: tile,
     source,
     groupId,
     anchorTileId: tile.dataset.tileId,
@@ -868,17 +889,33 @@ function colorName(color) {
   return ({ red: '빨강', blue: '파랑', orange: '주황', black: '검정' })[color] || '';
 }
 
+function latestOpponentSubmission() {
+  return (state?.recentSubmissions || []).find((entry) => entry?.player?.id && entry.player.id !== state?.you?.id) || null;
+}
+
+function tileHighlight(tile, source) {
+  const justPlayed = source === 'group' && Boolean(latestOpponentSubmission()?.tiles?.some((entry) => entry.id === tile.id));
+  const justDrawn = source !== 'history' && state?.lastDrawTileId === tile.id;
+  const labels = [];
+  if (justPlayed) labels.push('상대가 방금 낸 패');
+  if (justDrawn) labels.push('방금 뽑은 패');
+  return {
+    className: `${justPlayed ? 'recent-opponent-play' : ''} ${justDrawn ? 'recent-draw' : ''}`,
+    label: labels.join(' · '),
+  };
+}
 function tileHtml(tile, source, groupId, editable) {
   const selectedHere = selected && selected.tileId === tile.id && selected.source === source && selected.groupId === groupId;
   const batchSelected = batchMatches(source, groupId || '', tile.id);
+  const highlight = tileHighlight(tile, source);
   const resolved = tile.kind === 'joker' && tile.resolvedFace ? `<small>${tile.resolvedFace.value}${tile.resolvedFace.color.slice(0, 1).toUpperCase()}</small>` : '';
   const color = tile.kind === 'joker' ? 'joker' : tile.color;
   const tag = editable ? 'button' : 'span';
   const data = editable ? `data-action="select-tile" data-source="${source}" data-group-id="${escapeHtml(groupId || '')}" data-tile-id="${tile.id}"` : '';
   const drag = editable ? 'draggable="true" data-drag-tile="true"' : '';
-  return `<${tag} class="tile ${color} ${selectedHere ? 'selected' : ''} ${batchSelected ? 'batch-selected' : ''}" ${data} ${drag} aria-label="${faceDescription(tile)}" title="${faceDescription(tile)}"><b>${tile.kind === 'joker' ? '★' : tile.value}</b>${resolved}<i></i></${tag}>`;
+  const description = `${faceDescription(tile)}${highlight.label ? ` · ${highlight.label}` : ''}`;
+  return `<${tag} class="tile ${color} ${selectedHere ? 'selected' : ''} ${batchSelected ? 'batch-selected' : ''} ${highlight.className}" ${data} ${drag} aria-label="${description}" title="${description}"><b>${tile.kind === 'joker' ? '★' : tile.value}</b>${resolved}<i></i></${tag}>`;
 }
-
 function meldHtml(group, editable) {
   const canTarget = editable && (state.you.hasOpened || !group.existing);
   const dropData = editable && canTarget
@@ -990,7 +1027,7 @@ function gamePage() {
           </section>
           <section class="seat-grid">${opponentsHtml()}</section>
           <section class="board-card ${canEdit ? 'editing' : ''}">
-            <div class="formula-bar"><span>fx</span><p>${opening ? '첫 등록: 손패 타일만으로 30점 이상' : canEdit ? (dirty ? '개인 초안 편집 중 · 상대에게는 아직 보이지 않음' : '보드 중간 패를 길게 눌러 뒤쪽을 함께 잡을 수 있어요') : '보드의 유효한 조합'}</p><small>${canEdit ? `${state.room.turnSeconds}초 턴` : '읽기 전용'}</small></div>
+            <div class="formula-bar"><span>fx</span><p>${opening ? '첫 등록: 손패 타일만으로 30점 이상' : canEdit ? (dirty ? '개인 초안 편집 중 · 상대에게는 아직 보이지 않음' : '보드 패를 길게 눌러 이어진 조합을 함께 잡을 수 있어요') : '보드의 유효한 조합'}</p><small>${canEdit ? `${state.room.turnSeconds}초 턴` : '읽기 전용'}</small></div>
             <div class="board-toolbar">
               <div><p class="eyebrow">TABLE</p><h2>게임 보드</h2></div>
               ${canEdit ? `<div class="edit-tools"><span class="selected-label ${selected || batchSelection ? 'has-selection' : ''}">${escapeHtml(selectedLabel())}</span><button class="outline-button" data-action="new-group" ${selected ? '' : 'disabled'}>+ 새 조합</button>${selected?.source === 'group' ? '<button class="outline-button" data-action="to-rack">임시 손패로</button>' : ''}<button class="text-button" data-action="undo-draft" ${dirty ? '' : 'disabled'}>되돌리기</button></div>` : ''}
@@ -999,9 +1036,9 @@ function gamePage() {
             <p class="board-density-status" data-board-density-status aria-live="polite" hidden></p>${canEdit ? `<p class="board-batch-status" data-board-batch-status aria-live="polite" hidden></p>` : ''}
             ${canEdit && opening && state.board.length > 0 ? '<p class="opening-alert">첫 등록 전에는 기존 보드를 바꾸거나 타일을 더할 수 없습니다.</p>' : ''}
           </section>
-          ${opponentSubmissionHistoryHtml()}
+
           <section class="rack-card ${canEdit ? 'editing' : ''}">
-            <div class="rack-heading"><div><p class="eyebrow">MY RACK</p><h2>${canEdit ? '내 손패와 임시 대기열' : '내 손패'}</h2></div><div class="rack-heading-actions"><div class="rack-hint">${canEdit ? '손패는 연속 패를 길게 눌러 묶고 · 보드는 중간을 길게 눌러 뒤쪽 묶기' : soloMode && activeOpponent?.isBot ? 'AI가 수를 계산 중입니다' : '상대 턴에는 읽기 전용'}</div>${rackControls}</div></div>
+            <div class="rack-heading"><div><p class="eyebrow">MY RACK</p><h2>${canEdit ? '내 손패와 임시 대기열' : '내 손패'}</h2></div><div class="rack-heading-actions"><div class="rack-hint">${canEdit ? '손패·보드에서 이어진 수 또는 같은 숫자를 길게 눌러 묶기' : soloMode && activeOpponent?.isBot ? 'AI가 수를 계산 중입니다' : '상대 턴에는 읽기 전용'}</div>${rackControls}</div></div>
             <div class="rack-tiles ${shownRack.length ? '' : 'empty'}" ${canEdit ? 'data-drop-zone="rack"' : ''}>${shownRack.length ? shownRack.map((tile) => tileHtml(tile, 'rack', '', canEdit)).join('') : '<span>손패가 없습니다.</span>'}</div>${canEdit ? `<p class="rack-batch-status" data-rack-batch-status aria-live="polite" ${batchSelection?.source === 'rack' ? '' : 'hidden'}>${escapeHtml(batchStatusText())}</p>` : ''}
             <div class="turn-actions">
               <button class="draw-button" data-action="draw-tile" ${canEdit ? '' : 'disabled'}><span>＋</span>${state.poolCount ? '1장 뽑고 턴 끝내기' : '패스하고 턴 끝내기'}</button>
@@ -1056,7 +1093,7 @@ function syncWorksheetHeaderOffsets() {
 function fitBoardDensity() {
   const board = document.querySelector('.board-grid');
   if (!board) return;
-  const densities = ['normal', 'compact', 'tight', 'ultra'];
+  const densities = ['normal', 'compact', 'tight', 'ultra', 'micro'];
   let density = densities[densities.length - 1];
   for (const candidate of densities) {
     board.dataset.boardDensity = candidate;
@@ -1072,8 +1109,8 @@ function fitBoardDensity() {
   if (status) {
     status.hidden = density === 'normal' && !overflowing;
     status.textContent = overflowing
-      ? '패가 많아 가장 작은 보기로 압축했습니다 · 보드 안에서만 스크롤됩니다'
-      : `패가 많아 ${density === 'compact' ? '한 단계' : density === 'tight' ? '두 단계' : '세 단계'} 압축해 표시 중입니다`;
+      ? '패가 많아 가장 작은 보기로 압축해 표시 중입니다'
+      : `패가 많아 ${density === 'compact' ? '한 단계' : density === 'tight' ? '두 단계' : density === 'ultra' ? '세 단계' : '네 단계'} 압축해 표시 중입니다`;
   }
 }
 
@@ -1487,11 +1524,10 @@ async function copyInvite() {
 }
 
 function clearDragFeedback() {
-  document.querySelectorAll('.dragging, .batch-dragging, .drag-over').forEach((element) => {
-    element.classList.remove('dragging', 'batch-dragging', 'drag-over');
+  document.querySelectorAll('.dragging, .batch-dragging, .touch-dragging, .drag-over').forEach((element) => {
+    element.classList.remove('dragging', 'batch-dragging', 'touch-dragging', 'drag-over');
   });
 }
-
 function dropDestination(target, clientX) {
   if (target.dataset.dragTile) {
     const box = target.getBoundingClientRect();
@@ -1506,22 +1542,105 @@ function dropDestination(target, clientX) {
   return null;
 }
 
+function markDraggedTiles(tileIds, extraClass = '') {
+  document.querySelectorAll('[data-drag-tile]').forEach((entry) => {
+    if (!tileIds.includes(entry.dataset.tileId)) return;
+    entry.classList.add('dragging', 'batch-dragging');
+    if (extraClass) entry.classList.add(extraClass);
+  });
+}
+
+function beginTouchTileDrag(tile, event, selectedIds = null) {
+  if (event.pointerType === 'mouse' || !tile || !draft || !state?.turn?.isYourTurn) return false;
+  const sourceName = tile.dataset.source;
+  const groupId = tile.dataset.groupId || '';
+  const tileId = tile.dataset.tileId;
+  const tileIds = (selectedIds?.length ? selectedIds : [tileId])
+    .filter((id) => Boolean(findDraftTile(sourceName, groupId, id)));
+  const source = findDraftTile(sourceName, groupId, tileId);
+  if (!source || !tileIds.length || (source.group?.existing && !state.you.hasOpened)) return false;
+  if (!selectedIds?.length) clearBatchSelection();
+  draggedTile = { source: sourceName, groupId, tileId, tileIds: [...tileIds] };
+  touchDrag = { pointerId: event.pointerId };
+  markDraggedTiles(tileIds, 'touch-dragging');
+  if (event.cancelable) event.preventDefault();
+  return true;
+}
+
+function touchDropTarget(event) {
+  const hit = document.elementFromPoint(event.clientX, event.clientY);
+  return hit?.closest?.('[data-drag-tile], [data-drop-zone], [data-drop-blocked]') || null;
+}
+
+function updateTouchTileDrag(event) {
+  if (!touchDrag || touchDrag.pointerId !== event.pointerId) return false;
+  if (event.cancelable) event.preventDefault();
+  const target = touchDropTarget(event);
+  document.querySelectorAll('.drag-over').forEach((element) => element.classList.remove('drag-over'));
+  if (target && !target.dataset.dropBlocked && !(target.dataset.dragTile && draggedTile?.tileIds.includes(target.dataset.tileId))) {
+    target.classList.add('drag-over');
+  }
+  return true;
+}
+
+function finishTouchTileDrag(event, cancelled = false) {
+  if (!touchDrag || touchDrag.pointerId !== event.pointerId) return false;
+  if (!cancelled) {
+    const target = touchDropTarget(event);
+    if (target && !target.dataset.dropBlocked) {
+      moveDraftTile(draggedTile, dropDestination(target, event.clientX));
+    }
+  }
+  lastDragAt = Date.now();
+  suppressTileClickUntil = Date.now() + 420;
+  touchDrag = null;
+  draggedTile = null;
+  clearDragFeedback();
+  return true;
+}
+
 document.addEventListener('pointerdown', (event) => {
   if (event.isPrimary === false || (event.pointerType === 'mouse' && event.button !== 0)) return;
   const tile = event.target.closest('[data-drag-tile]');
   if (!tile || !draft || !state?.turn?.isYourTurn) return;
   const source = tile.dataset.source;
   const groupId = tile.dataset.groupId || '';
-  if (batchMatches(source, groupId, tile.dataset.tileId)) return;
+  if (event.pointerType !== 'mouse' && tile.setPointerCapture) {
+    try { tile.setPointerCapture(event.pointerId); } catch { /* Browser can reject a stale pointer. */ }
+  }
+  if (batchMatches(source, groupId, tile.dataset.tileId)) {
+    if (event.pointerType !== 'mouse') {
+      tileHold = {
+        pointerId: event.pointerId,
+        element: tile,
+        source,
+        groupId,
+        anchorTileId: tile.dataset.tileId,
+        tileIds: [...batchSelection.tileIds],
+        selectedCount: batchSelection.tileIds.length,
+        active: true,
+        startX: event.clientX,
+        startY: event.clientY,
+      };
+    }
+    return;
+  }
   beginTileHold(tile, event);
 });
 
 document.addEventListener('pointermove', (event) => {
-  if (!tileHold || tileHold.pointerId !== event.pointerId || tileHold.active) return;
-  if (Math.hypot(event.clientX - tileHold.startX, event.clientY - tileHold.startY) > 8) stopTileHold();
+  if (updateTouchTileDrag(event)) return;
+  if (!tileHold || tileHold.pointerId !== event.pointerId) return;
+  if (Math.hypot(event.clientX - tileHold.startX, event.clientY - tileHold.startY) <= 8) return;
+  const held = tileHold;
+  const selectedIds = held.active ? (batchSelection?.tileIds || held.tileIds.slice(0, held.selectedCount)) : null;
+  stopTileHold();
+  paintBatchSelection();
+  beginTouchTileDrag(held.element, event, selectedIds);
 });
 
 document.addEventListener('pointerup', (event) => {
+  if (finishTouchTileDrag(event)) return;
   if (!tileHold || tileHold.pointerId !== event.pointerId) return;
   const completedHold = tileHold.active;
   stopTileHold();
@@ -1530,6 +1649,7 @@ document.addEventListener('pointerup', (event) => {
 });
 
 document.addEventListener('pointercancel', (event) => {
+  if (finishTouchTileDrag(event, true)) return;
   if (!tileHold || tileHold.pointerId !== event.pointerId) return;
   const completedHold = tileHold.active;
   stopTileHold();
@@ -1537,13 +1657,24 @@ document.addEventListener('pointercancel', (event) => {
   if (completedHold) suppressTileClickUntil = Date.now() + 420;
 });
 
-window.addEventListener('blur', clearBatchSelection);
+window.addEventListener('blur', () => {
+  if (touchDrag) {
+    touchDrag = null;
+    draggedTile = null;
+    clearDragFeedback();
+  }
+  clearBatchSelection();
+});
 window.addEventListener('resize', () => {
   clearTimeout(boardFitTimer);
   boardFitTimer = setTimeout(fitBoardDensity, 120);
 });
 
 document.addEventListener('dragstart', (event) => {
+  if (touchDrag) {
+    event.preventDefault();
+    return;
+  }
   const tile = event.target.closest('[data-drag-tile]');
   if (!tile || !draft || !state?.turn?.isYourTurn) return;
   const sourceName = tile.dataset.source;
@@ -1564,9 +1695,7 @@ document.addEventListener('dragstart', (event) => {
   draggedTile = { source: sourceName, groupId, tileId, tileIds: [...tileIds] };
   event.dataTransfer.effectAllowed = 'move';
   event.dataTransfer.setData('text/plain', tileIds.join(','));
-  document.querySelectorAll('[data-drag-tile]').forEach((entry) => {
-    if (tileIds.includes(entry.dataset.tileId)) entry.classList.add('dragging', 'batch-dragging');
-  });
+  markDraggedTiles(tileIds);
 });
 
 document.addEventListener('dragover', (event) => {
@@ -1592,6 +1721,7 @@ document.addEventListener('drop', (event) => {
 });
 
 document.addEventListener('dragend', () => {
+  if (touchDrag) return;
   if (draggedTile) lastDragAt = Date.now();
   draggedTile = null;
   stopTileHold();
