@@ -47,6 +47,7 @@ let tileHoldStepTimer = null;
 let suppressTileClickUntil = 0;
 let renderSequence = 0;
 let boardFitTimer = null;
+globalThis.turnActionInFlight = false;
 let publicRooms = [];
 let publicRoomsStatus = 'idle';
 let publicRoomsRefreshTimer = null;
@@ -1050,7 +1051,7 @@ function gamePage() {
         <div class="workbook-sheet-content">
           <div class="sheet-menu" aria-hidden="true"><span>파일</span><span>편집</span><span>보기</span><span>게임</span><div></div><small>공유됨 · 자동 저장됨</small></div>
           <section class="game-banner">
-            <div class="room-label"><span class="eyebrow">${soloMode ? 'AI PRACTICE' : `ROOM ${state.room.code}`}</span><div class="room-title-row"><h1>${escapeHtml(GAME_TITLE)}</h1><button class="game-home-button" type="button" data-action="home" aria-label="게임을 나가 첫 화면으로" title="첫 화면으로"><span aria-hidden="true">⌂</span><span>홈</span></button></div></div>
+            <div class="room-label"><span class="eyebrow">${soloMode ? 'AI PRACTICE' : `ROOM ${state.room.code}`}</span><div class="room-title-row"><h1>${escapeHtml(GAME_TITLE)}</h1><button class="game-home-button" type="button" data-action="home" aria-label="게임을 나가 첫 화면으로" title="첫 화면으로"><span aria-hidden="true">⌂</span><span>홈</span></button><button class="game-theme-button" type="button" data-action="theme" data-theme="${theme() === 'sheet' ? 'classic' : 'sheet'}">${theme() === 'sheet' ? '기본' : '엑셀'}</button></div></div>
             ${turnClock()}
             <div class="pool-badge"><span>풀</span><strong>${state.poolCount}</strong></div>
           </section>
@@ -1122,9 +1123,17 @@ function syncWorksheetHeaderOffsets() {
 function fitBoardDensity() {
   const board = document.querySelector('.board-grid');
   if (!board) return;
-  const densities = ['normal', 'compact', 'tight', 'ultra', 'micro'];
+  const densities = ['normal', 'compact', 'tight', 'ultra', 'micro', 'nano'];
+  const tileCount = board.querySelectorAll('.meld .tile').length;
+  const meldCount = board.querySelectorAll('.meld').length;
+  const preferredIndex = tileCount >= 72 || meldCount >= 17 ? 5
+    : tileCount >= 48 || meldCount >= 11 ? 4
+      : tileCount >= 32 || meldCount >= 8 ? 3
+        : tileCount >= 20 || meldCount >= 5 ? 2
+          : tileCount >= 10 || meldCount >= 3 ? 1
+            : 0;
   let density = densities[densities.length - 1];
-  for (const candidate of densities) {
+  for (const candidate of densities.slice(preferredIndex)) {
     board.dataset.boardDensity = candidate;
     if (board.scrollHeight <= board.clientHeight + 1) {
       density = candidate;
@@ -1137,12 +1146,12 @@ function fitBoardDensity() {
   const status = document.querySelector('[data-board-density-status]');
   if (status) {
     status.hidden = density === 'normal' && !overflowing;
+    const compressionName = { compact: '한 단계', tight: '두 단계', ultra: '세 단계', micro: '네 단계', nano: '다섯 단계' }[density] || '여러 단계';
     status.textContent = overflowing
       ? '패가 많아 가장 작은 보기로 압축해 표시 중입니다'
-      : `패가 많아 ${density === 'compact' ? '한 단계' : density === 'tight' ? '두 단계' : density === 'ultra' ? '세 단계' : '네 단계'} 압축해 표시 중입니다`;
+      : `패가 많아 ${compressionName} 압축해 표시 중입니다`;
   }
 }
-
 function restoreScrollState(snapshot, sequence) {
   const restore = () => {
     if (sequence !== renderSequence) return;
@@ -1390,7 +1399,8 @@ function undoDraft() {
 }
 
 async function submitTurn() {
-  if (!draft || !isDraftDirty()) return;
+  if (globalThis.turnActionInFlight || !draft || !isDraftDirty()) return;
+  globalThis.turnActionInFlight = true;
   sortDraftMelds();
   const attemptedDraft = cloneDraftModel(draft);
   const attemptedBaseline = baselineSignature;
@@ -1417,10 +1427,13 @@ async function submitTurn() {
       render();
     }
     showToast(error.message, 'error');
+  } finally {
+    globalThis.turnActionInFlight = false;
   }
 }
 async function drawTile() {
-  if (!state?.turn?.isYourTurn) return;
+  if (globalThis.turnActionInFlight || !state?.turn?.isYourTurn) return;
+  globalThis.turnActionInFlight = true;
   try {
     const action = { clientId, action: 'draw' };
     const response = isStatelessSolo()
@@ -1429,6 +1442,8 @@ async function drawTile() {
     receiveState(response);
   } catch (error) {
     showToast(error.message, 'error');
+  } finally {
+    globalThis.turnActionInFlight = false;
   }
 }
 
