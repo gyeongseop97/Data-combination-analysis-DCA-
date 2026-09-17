@@ -8,7 +8,7 @@
     "test": "pushd \"%INIT_CWD%\" && node test/run.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "24.x"
   },
   "dependencies": {
     "@upstash/qstash": "^2.11.3",
