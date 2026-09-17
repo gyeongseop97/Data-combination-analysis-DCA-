@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#143c35" />
+    <title>데이터 조합 분석_v1.xlsx</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-theme="classic">
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <div id="app" class="app-shell" aria-live="polite"></div>
+
+    <dialog id="rulesDialog" class="rules-dialog">
+      <form method="dialog">
+        <button class="icon-button dialog-close" aria-label="닫기">×</button>
+      </form>
+      <p class="eyebrow">CLASSIC RULES</p>
+      <h2>실제 루미큐브의 핵심 규칙</h2>
+      <div class="rules-grid">
+        <section>
+          <h3>조합</h3>
+          <p>같은 숫자의 서로 다른 색 3~4장, 또는 같은 색의 연속 숫자 3장 이상을 만듭니다. 1은 낮은 숫자입니다.</p>
+        </section>
+        <section>
+          <h3>첫 등록</h3>
+          <p>처음에는 내 손패만으로 유효 조합을 만들고 합계 30점 이상을 내려야 합니다. 조커는 대신한 숫자값으로 계산합니다.</p>
+        </section>
+        <section>
+          <h3>그 이후</h3>
+          <p>매 턴 내 손패 1장 이상을 내며, 기존 보드를 재배치할 수 있습니다. 턴을 끝낼 때 모든 조합은 유효해야 합니다.</p>
+        </section>
+        <section>
+          <h3>조커와 종료</h3>
+          <p>조커는 빈 타일을 대신합니다. 손패를 먼저 비우면 승리하고, 손패에 남은 조커는 30점으로 계산됩니다.</p>
+        </section>
+      </div>
+      <p class="rules-note">시간이 끝나면 초안은 되돌아가며, 조작 중이었다면 3장, 아니면 1장을 자동으로 뽑습니다.</p>
+    </dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
