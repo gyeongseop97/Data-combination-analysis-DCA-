@@ -216,6 +216,51 @@ function cloneTile(tile) {
   return { ...tile, resolvedFace: tile.resolvedFace ? { ...tile.resolvedFace } : undefined };
 }
 
+function knownTileFace(tile) {
+  if (!tile || (tile.kind === 'joker' && !tile.resolvedFace)) return null;
+  return tile.kind === 'joker' ? tile.resolvedFace : tile;
+}
+
+function inferredMeldType(tiles) {
+  if (!Array.isArray(tiles) || tiles.length < 3) return '';
+  const faces = tiles.map(knownTileFace);
+  if (faces.some((face) => !face)) return '';
+
+  const sameValue = faces.every((face) => Number(face.value) === Number(faces[0].value));
+  const differentColors = new Set(faces.map((face) => face.color)).size === faces.length;
+  if (tiles.length <= 4 && sameValue && differentColors) return 'group';
+
+  const sameColor = faces.every((face) => face.color === faces[0].color);
+  const values = faces.map((face) => Number(face.value)).sort((left, right) => left - right);
+  const sequential = new Set(values).size === values.length
+    && values.every((value, index) => index === 0 || value === values[index - 1] + 1);
+  return sameColor && sequential ? 'run' : '';
+}
+
+function sortDraftMeld(group) {
+  if (!group?.tiles?.length) return;
+  // New, incomplete, and unresolved-joker groups keep their explicit drop order.
+  // The server supplies the canonical order once it has resolved a joker.
+  const type = group.type || inferredMeldType(group.tiles);
+  const faces = group.tiles.map(knownTileFace);
+  if (!type || faces.some((face) => !face)) return;
+
+  group.tiles = group.tiles
+    .map((tile, index) => ({ tile, face: knownTileFace(tile), index }))
+    .sort((left, right) => {
+      const valueDelta = Number(left.face.value) - Number(right.face.value);
+      if (valueDelta) return valueDelta;
+      const colorDelta = colors.indexOf(left.face.color) - colors.indexOf(right.face.color);
+      return colorDelta || left.index - right.index;
+    })
+    .map(({ tile }) => tile);
+}
+
+function sortDraftMelds() {
+  if (!draft) return;
+  draft.groups.forEach(sortDraftMeld);
+}
+
 function rackOrderKey(snapshot = state) {
   if (!activeRoomCode || !snapshot?.you?.id) return '';
   return `${RACK_ORDER_PREFIX}:${activeRoomCode}:${snapshot.you.id}`;
@@ -259,7 +304,7 @@ function batchStatusText(selection = batchSelection) {
   if (!selection?.tileIds?.length) return '';
   return selection.source === 'group'
     ? `보드 뒤쪽 패 ${selection.tileIds.length}장 선택됨 · 드래그하면 함께 이동합니다`
-    : `연속 패 ${selection.tileIds.length}장 선택됨 · 드래그하면 함께 이동합니다`;
+    : `조합 가능 패 ${selection.tileIds.length}장 선택됨 · 드래그하면 함께 이동합니다`;
 }
 
 function refreshSelectedLabel() {
@@ -327,6 +372,26 @@ function rackConsecutiveTileIds(tileId) {
   if (startIndex < 0) return [];
   const first = draft.rack[startIndex];
   if (first.kind === 'joker') return [];
+
+  const second = draft.rack[startIndex + 1];
+  if (!second || second.kind === 'joker') return [first.id];
+
+  if (second.value === first.value && second.color !== first.color) {
+    const ids = [first.id];
+    const usedColors = new Set([first.color]);
+    for (let index = startIndex + 1; index < draft.rack.length; index += 1) {
+      const next = draft.rack[index];
+      if (next.kind === 'joker' || next.value !== first.value || usedColors.has(next.color)) break;
+      ids.push(next.id);
+      usedColors.add(next.color);
+    }
+    // A same-number set is only a playable meld when it has three different colors.
+    return ids.length >= 3 ? ids : [first.id];
+  }
+
+  if (second.color !== first.color || Math.abs(Number(second.value) - Number(first.value)) !== 1) {
+    return [first.id];
+  }
 
   const ids = [first.id];
   let previous = first;
@@ -1122,6 +1187,7 @@ function moveDraftTile(drag, destination) {
       tiles,
     });
   }
+  sortDraftMelds();
   if (drag.source === 'rack' || destination.type === 'rack') rememberRackOrder(draft.rack);
   afterDraftChange();
   return true;
@@ -1182,6 +1248,7 @@ function createGroupFromSelected() {
   const tile = takeSelected();
   if (!tile) return;
   draft.groups.push({ id: `draft-${crypto.randomUUID().replace(/-/g, '')}`, type: '', existing: false, tiles: [tile] });
+  sortDraftMelds();
   afterDraftChange();
 }
 
@@ -1197,6 +1264,7 @@ function addSelectedToGroup(groupId) {
   const tile = takeSelected();
   if (!tile) return;
   target.tiles.push(tile);
+  sortDraftMelds();
   afterDraftChange();
 }
 
@@ -1209,6 +1277,7 @@ function moveSelectedToRack() {
   const tile = takeSelected();
   if (!tile) return;
   draft.rack.push(tile);
+  sortDraftMelds();
   afterDraftChange();
 }
 
@@ -1220,6 +1289,7 @@ function undoDraft() {
 
 async function submitTurn() {
   if (!draft || !isDraftDirty()) return;
+  sortDraftMelds();
   try {
     const response = await api(`/api/rooms/${activeRoomCode}/action`, {
       method: 'POST',

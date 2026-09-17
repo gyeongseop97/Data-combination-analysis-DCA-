@@ -583,10 +583,16 @@ function sortMeldTiles(tileIds, details) {
     const tile = TILE_CATALOG.get(id);
     return tile.kind === 'joker' ? details.jokerBindings[id] : tile;
   };
-  if (details.type === 'run') {
-    return [...tileIds].sort((a, b) => face(a).value - face(b).value);
-  }
-  return [...tileIds].sort((a, b) => COLOR_ORDER[face(a).color] - COLOR_ORDER[face(b).color]);
+  return tileIds
+    .map((id, index) => ({ id, face: face(id), index }))
+    .sort((left, right) => {
+      const valueDelta = Number(left.face.value) - Number(right.face.value);
+      if (valueDelta) return valueDelta;
+      const colorDelta = (COLOR_ORDER[left.face.color] ?? COLORS.length)
+        - (COLOR_ORDER[right.face.color] ?? COLORS.length);
+      return colorDelta || left.index - right.index;
+    })
+    .map((entry) => entry.id);
 }
 
 function ensureActiveTurn(room, clientId) {
@@ -1006,6 +1012,8 @@ module.exports = {
   requireRoom,
   roomView,
   rooms,
+  sortMeldTiles,
   server,
   updateSettings,
+  validateMeld,
 };
