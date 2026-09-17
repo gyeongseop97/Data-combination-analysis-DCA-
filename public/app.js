@@ -9,6 +9,8 @@ const SOLO_SESSION_KEY = 'office-rummikub-solo-session';
 const colors = ['red', 'blue', 'orange', 'black'];
 const RACK_HOLD_DELAY = 360;
 const RACK_HOLD_STEP = 220;
+const HOLD_MOVE_TOLERANCE = 8;
+const TOUCH_HOLD_MOVE_TOLERANCE = 20;
 const GAME_TITLE = '데이터 조합 분석_v1.xlsx';
 const PUBLIC_ROOM_REFRESH_MS = 12_000;
 const ROOM_STATE_REFRESH_MS = 1_500;
@@ -37,6 +39,7 @@ let connection = 'idle';
 let draggedTile = null;
 let touchDrag = null;
 let lastDragAt = 0;
+let pendingInteractiveRender = false;
 let batchSelection = null;
 let tileHold = null;
 let tileHoldDelayTimer = null;
@@ -462,6 +465,7 @@ function beginTileHold(tile, event) {
     tileHold = {
       pointerId: event.pointerId,
       element: tile,
+      pointerType: event.pointerType,
       source,
       groupId,
       anchorTileId: tile.dataset.tileId,
@@ -478,6 +482,7 @@ function beginTileHold(tile, event) {
   tileHold = {
     pointerId: event.pointerId,
     element: tile,
+    pointerType: event.pointerType,
     source,
     groupId,
     anchorTileId: tile.dataset.tileId,
@@ -491,7 +496,7 @@ function beginTileHold(tile, event) {
     if (!tileHold) return;
     tileHoldDelayTimer = null;
     tileHold.active = true;
-    tileHold.selectedCount = 1;
+    tileHold.selectedCount = Math.min(2, tileHold.tileIds.length);
     selected = null;
     document.querySelectorAll('.tile.selected').forEach((entry) => entry.classList.remove('selected'));
     setBatchSelection(tileHold.source, tileHold.groupId, tileHold.tileIds.slice(0, tileHold.selectedCount));
@@ -506,7 +511,22 @@ function beginTileHold(tile, event) {
       setBatchSelection(tileHold.source, tileHold.groupId, tileHold.tileIds.slice(0, tileHold.selectedCount));
     }, RACK_HOLD_STEP);
   }, RACK_HOLD_DELAY);
-}function hydrateDraft(nextState = state) {
+}
+
+function cloneDraftModel(model) {
+  if (!model) return null;
+  return {
+    groups: model.groups.map((group) => ({
+      id: group.id,
+      type: group.type,
+      existing: Boolean(group.existing),
+      tiles: group.tiles.map(cloneTile),
+    })),
+    rack: model.rack.map(cloneTile),
+  };
+}
+
+function hydrateDraft(nextState = state) {
   clearBatchSelection();
   if (!nextState?.turn?.isYourTurn || !nextState?.you) {
     draft = null;
@@ -564,9 +584,18 @@ function receiveState(nextState) {
   state = nextState;
   latestStateDigest = stateDigest(nextState);
   if (!keepDraft) hydrateDraft(nextState);
+  if (keepDraft && (tileHold || touchDrag)) {
+    pendingInteractiveRender = true;
+    return;
+  }
   render();
 }
 
+function flushInteractiveRender() {
+  if (!pendingInteractiveRender) return;
+  pendingInteractiveRender = false;
+  render();
+}
 function stopRoomStateRefresh() {
   if (roomStateRefreshTimer) clearInterval(roomStateRefreshTimer);
   roomStateRefreshTimer = null;
@@ -1137,6 +1166,7 @@ function restoreScrollState(snapshot, sequence) {
 }
 
 function render() {
+  pendingInteractiveRender = false;
   const scrollState = captureScrollState();
   const sequence = ++renderSequence;
   document.body.dataset.theme = theme();
@@ -1362,6 +1392,9 @@ function undoDraft() {
 async function submitTurn() {
   if (!draft || !isDraftDirty()) return;
   sortDraftMelds();
+  const attemptedDraft = cloneDraftModel(draft);
+  const attemptedBaseline = baselineSignature;
+  const attemptedTurnKey = draftTurnKey;
   try {
     const action = {
       clientId,
@@ -1374,10 +1407,18 @@ async function submitTurn() {
       : await api(`/api/rooms/${activeRoomCode}/action`, { method: 'POST', body: JSON.stringify(action) });
     receiveState(response);
   } catch (error) {
+    if (state?.turn?.isYourTurn && state.turn.deadlineAt === attemptedTurnKey) {
+      draft = attemptedDraft;
+      baselineSignature = attemptedBaseline;
+      draftTurnKey = attemptedTurnKey;
+      selected = null;
+      clearBatchSelection();
+      syncDraftStatus();
+      render();
+    }
     showToast(error.message, 'error');
   }
 }
-
 async function drawTile() {
   if (!state?.turn?.isYourTurn) return;
   try {
@@ -1596,6 +1637,7 @@ function finishTouchTileDrag(event, cancelled = false) {
   touchDrag = null;
   draggedTile = null;
   clearDragFeedback();
+  flushInteractiveRender();
   return true;
 }
 
@@ -1613,6 +1655,7 @@ document.addEventListener('pointerdown', (event) => {
       tileHold = {
         pointerId: event.pointerId,
         element: tile,
+        pointerType: event.pointerType,
         source,
         groupId,
         anchorTileId: tile.dataset.tileId,
@@ -1631,14 +1674,16 @@ document.addEventListener('pointerdown', (event) => {
 document.addEventListener('pointermove', (event) => {
   if (updateTouchTileDrag(event)) return;
   if (!tileHold || tileHold.pointerId !== event.pointerId) return;
-  if (Math.hypot(event.clientX - tileHold.startX, event.clientY - tileHold.startY) <= 8) return;
+  const moveTolerance = !tileHold.active && tileHold.pointerType === 'touch'
+    ? TOUCH_HOLD_MOVE_TOLERANCE
+    : HOLD_MOVE_TOLERANCE;
+  if (Math.hypot(event.clientX - tileHold.startX, event.clientY - tileHold.startY) <= moveTolerance) return;
   const held = tileHold;
   const selectedIds = held.active ? (batchSelection?.tileIds || held.tileIds.slice(0, held.selectedCount)) : null;
   stopTileHold();
   paintBatchSelection();
-  beginTouchTileDrag(held.element, event, selectedIds);
+  if (!beginTouchTileDrag(held.element, event, selectedIds)) flushInteractiveRender();
 });
-
 document.addEventListener('pointerup', (event) => {
   if (finishTouchTileDrag(event)) return;
   if (!tileHold || tileHold.pointerId !== event.pointerId) return;
@@ -1646,8 +1691,8 @@ document.addEventListener('pointerup', (event) => {
   stopTileHold();
   paintBatchSelection();
   if (completedHold) suppressTileClickUntil = Date.now() + 420;
+  flushInteractiveRender();
 });
-
 document.addEventListener('pointercancel', (event) => {
   if (finishTouchTileDrag(event, true)) return;
   if (!tileHold || tileHold.pointerId !== event.pointerId) return;
@@ -1655,8 +1700,8 @@ document.addEventListener('pointercancel', (event) => {
   stopTileHold();
   paintBatchSelection();
   if (completedHold) suppressTileClickUntil = Date.now() + 420;
+  flushInteractiveRender();
 });
-
 window.addEventListener('blur', () => {
   if (touchDrag) {
     touchDrag = null;
@@ -1664,6 +1709,7 @@ window.addEventListener('blur', () => {
     clearDragFeedback();
   }
   clearBatchSelection();
+  flushInteractiveRender();
 });
 window.addEventListener('resize', () => {
   clearTimeout(boardFitTimer);
@@ -1727,8 +1773,8 @@ document.addEventListener('dragend', () => {
   stopTileHold();
   paintBatchSelection();
   clearDragFeedback();
+  flushInteractiveRender();
 });
-
 document.addEventListener('submit', (event) => {
   if (event.target.id === 'soloGameForm') { event.preventDefault(); startSoloGame(event.target); }
   if (event.target.id === 'createRoomForm') { event.preventDefault(); createRoom(event.target); }

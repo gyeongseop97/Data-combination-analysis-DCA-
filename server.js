@@ -699,7 +699,9 @@ function commitMove(room, clientId, payload) {
   if (!player.hasOpened) {
     const everyOldGroupIsPresent = room.board.every((old) => proposed.some((group) => group.id === old.id && sameSet(group.tileIds, old.tileIds)));
     if (!everyOldGroupIsPresent) throw new Error('첫 등록 전에는 기존 보드를 그대로 유지해야 합니다.');
-    if (openingScore < 30) throw new Error(`첫 등록은 내 손패만으로 30점 이상이어야 합니다. (현재 ${openingScore}점)`);
+    if (openingScore < 30) {
+      throw new Error(`첫 등록은 내 손패만으로 30점 이상이어야 합니다. (현재 ${String(openingScore).padStart(2, '0')}점)`);
+    }
     player.hasOpened = true;
     log(room, `${player.name}님이 ${openingScore}점으로 첫 등록을 완료했습니다.`);
   } else {
