@@ -34,6 +34,11 @@ let latestStateDigest = '';
 let selected = null;
 let draft = null;
 let baselineSignature = '';
+let undoStack = [];
+let redoStack = [];
+let invalidMelds = new Map();
+let boardValidationMessage = '';
+let serverClockOffsetMs = 0;
 let draftTurnKey = null;
 let draftSyncTimer = null;
 let toastTimer = null;
@@ -241,7 +246,7 @@ function draftSignature(model) {
   const ids = (tiles) => tiles.map((tile) => tile.id).sort();
   return JSON.stringify({
     groups: model.groups
-      .map((group) => ({ id: group.id, tileIds: ids(group.tiles) }))
+      .map((group) => ({ id: group.id, tileIds: group.tiles.map((tile) => tile.id) }))
       .sort((left, right) => left.id.localeCompare(right.id)),
     rack: ids(model.rack),
   });
@@ -401,12 +406,30 @@ function paintBatchSelection() {
   refreshSelectedLabel();
 }
 
+function refreshHoldBubble() {
+  if (!tileHold?.active || tileHold.selectedCount < 2 || typeof document === 'undefined') return;
+  let bubble = document.querySelector('.hold-selection-bubble');
+  if (!bubble) {
+    bubble = document.createElement('div');
+    bubble.className = 'hold-selection-bubble';
+    bubble.setAttribute('role', 'status');
+    document.body.appendChild(bubble);
+  }
+  bubble.textContent = tileHold.selectedCount + '장 선택';
+  bubble.style.left = Math.max(28, Math.min(window.innerWidth - 28, tileHold.startX)) + 'px';
+  bubble.style.top = Math.max(34, tileHold.startY) + 'px';
+  if (tileHold.pointerType === 'touch' && tileHold.hapticCount !== tileHold.selectedCount) {
+    try { navigator.vibrate?.(12); } catch { /* Haptics are optional. */ }
+    tileHold.hapticCount = tileHold.selectedCount;
+  }
+}
 function stopTileHold() {
   clearTimeout(tileHoldDelayTimer);
   clearInterval(tileHoldStepTimer);
   tileHoldDelayTimer = null;
   tileHoldStepTimer = null;
   tileHold = null;
+  if (typeof document !== 'undefined') document.querySelector('.hold-selection-bubble')?.remove();
 }
 
 function clearBatchSelection() {
@@ -422,6 +445,7 @@ function setBatchSelection(source, groupId, tileIds) {
     tileIds: [...new Set(tileIds)],
   };
   paintBatchSelection();
+  refreshHoldBubble();
 }
 
 function compatibleTileIds(tiles, tileId) {
@@ -558,6 +582,84 @@ function cloneDraftModel(model) {
   };
 }
 
+function recordDraftHistory() {
+  if (!draft) return;
+  undoStack.push(cloneDraftModel(draft));
+  if (undoStack.length > 50) undoStack.shift();
+  redoStack = [];
+}
+
+function restoreDraftHistory(snapshot) {
+  draft = cloneDraftModel(snapshot);
+  rememberRackOrder(draft.rack);
+  selected = null;
+  clearBatchSelection();
+  invalidMelds.clear();
+  boardValidationMessage = '';
+  syncDraftStatus();
+  render();
+}
+
+function stepUndo() {
+  if (!draft || !undoStack.length || globalThis.turnActionInFlight) return;
+  redoStack.push(cloneDraftModel(draft));
+  restoreDraftHistory(undoStack.pop());
+}
+
+function stepRedo() {
+  if (!draft || !redoStack.length || globalThis.turnActionInFlight) return;
+  undoStack.push(cloneDraftModel(draft));
+  restoreDraftHistory(redoStack.pop());
+}
+
+function meldValidation(group) {
+  const tiles = group.tiles;
+  if (tiles.length < 3) return { issue: '타일이 3장 이상이어야 합니다.', score: 0 };
+  if (new Set(tiles.map((tile) => tile.id)).size !== tiles.length) return { issue: '같은 타일을 두 번 놓을 수 없습니다.', score: 0 };
+  const normal = tiles.filter((tile) => tile.kind !== 'joker');
+  const jokerCount = tiles.length - normal.length;
+  if (!normal.length) return { issue: '조커만으로는 조합을 만들 수 없습니다.', score: 0 };
+  const sameValue = normal.every((tile) => tile.value === normal[0].value);
+  const distinctColors = new Set(normal.map((tile) => tile.color)).size === normal.length;
+  if (tiles.length <= 4 && sameValue && distinctColors && jokerCount <= 4 - normal.length) {
+    return { issue: '', score: tiles.length * normal[0].value };
+  }
+  const sameColor = normal.every((tile) => tile.color === normal[0].color);
+  const distinctValues = new Set(normal.map((tile) => tile.value)).size === normal.length;
+  if (tiles.length <= 13 && sameColor && distinctValues) {
+    const candidates = [];
+    for (let start = 1; start <= 14 - tiles.length; start += 1) {
+      const run = Array.from({ length: tiles.length }, (_, index) => start + index);
+      if (normal.every((tile) => run.includes(tile.value))) candidates.push(run);
+    }
+    if (candidates.length) {
+      const run = candidates.find((candidate) => tiles.every((tile, index) => tile.kind === 'joker' || tile.value === candidate[index]))
+        || candidates[candidates.length - 1];
+      return { issue: '', score: run.reduce((sum, value) => sum + value, 0) };
+    }
+  }
+  if (sameValue && !distinctColors) return { issue: '같은 숫자는 서로 다른 색이어야 합니다.', score: 0 };
+  if (sameValue && tiles.length > 4) return { issue: '같은 숫자 조합은 최대 4장입니다.', score: 0 };
+  if (sameColor) return { issue: '같은 색의 연속 숫자로 맞춰 주세요.', score: 0 };
+  return { issue: '같은 숫자의 다른 색 또는 같은 색의 연속 숫자로 맞춰 주세요.', score: 0 };
+}
+
+function markDraftValidation(errorMessage = '') {
+  invalidMelds.clear();
+  boardValidationMessage = errorMessage;
+  if (!draft) return;
+  let openingScore = 0;
+  for (const group of draft.groups) {
+    const result = meldValidation(group);
+    if (result.issue) invalidMelds.set(group.id, result.issue);
+    else if (!state?.you?.hasOpened && !group.existing) openingScore += result.score;
+  }
+  if (!invalidMelds.size && !state?.you?.hasOpened && openingScore < 30) {
+    const reason = '첫 등록 합계 ' + String(openingScore).padStart(2, '0') + '/30점 · 타일을 더 올려 주세요.';
+    draft.groups.filter((group) => !group.existing).forEach((group) => invalidMelds.set(group.id, reason));
+    boardValidationMessage = reason;
+  }
+}
 function hydrateDraft(nextState = state) {
   clearBatchSelection();
   if (!nextState?.turn?.isYourTurn || !nextState?.you) {
@@ -565,6 +667,10 @@ function hydrateDraft(nextState = state) {
     selected = null;
     draftTurnKey = null;
     baselineSignature = '';
+    undoStack = [];
+    redoStack = [];
+    invalidMelds.clear();
+    boardValidationMessage = '';
     return;
   }
   draft = {
@@ -578,6 +684,10 @@ function hydrateDraft(nextState = state) {
   };
   baselineSignature = draftSignature(draft);
   draftTurnKey = nextState.turn.deadlineAt;
+  undoStack = [];
+  redoStack = [];
+  invalidMelds.clear();
+  boardValidationMessage = '';
   selected = null;
 }
 
@@ -614,7 +724,10 @@ function receiveState(nextState) {
     && nextState?.turn?.isYourTurn
     && nextState.turn.deadlineAt === draftTurnKey,
   );
+  const previousPhase = state?.room?.phase;
   state = nextState;
+  if (activeRoomCode && previousPhase && previousPhase !== nextState?.room?.phase) syncScreenUrl(nextState);
+  if (Number.isFinite(Number(nextState?.serverNow))) serverClockOffsetMs = Date.now() - Number(nextState.serverNow);
   latestStateDigest = stateDigest(nextState);
   if (!keepDraft) hydrateDraft(nextState);
   if (keepDraft && (tileHold || touchDrag)) {
@@ -675,21 +788,55 @@ function renderConnectionOnly() {
   });
 }
 
-function activateRoom(code, snapshot) {
+function screenForSnapshot(snapshot) {
+  if (!snapshot?.room) return 'home';
+  const solo = snapshot.room.mode === 'solo' && Boolean(soloSessionToken);
+  if (snapshot.room.phase === 'lobby') return 'lobby';
+  if (snapshot.room.phase === 'finished') return solo ? 'solo-result' : 'result';
+  return solo ? 'solo-game' : 'game';
+}
+
+function screenUrl(screen, code = '') {
+  if (screen === 'home') return location.pathname;
+  const params = new URLSearchParams();
+  if (code && !screen.startsWith('solo-')) params.set('room', code);
+  params.set('view', screen);
+  return location.pathname + '?' + params.toString();
+}
+
+function syncScreenUrl(snapshot, mode = 'replace', initialEntry = false) {
+  const screen = screenForSnapshot(snapshot);
+  const target = screenUrl(screen, snapshot?.room?.code || '');
+  if (initialEntry && !history.state?.dcaScreen) {
+    history.replaceState({ dcaScreen: 'home' }, '', screenUrl('home'));
+    history.pushState({ dcaScreen: screen }, '', target);
+    return;
+  }
+  if (location.pathname + location.search === target) return;
+  history[mode === 'push' ? 'pushState' : 'replaceState']({ dcaScreen: screen }, '', target);
+}
+
+function isCurrentRoomRoute() {
+  const params = new URLSearchParams(location.search);
+  const view = params.get('view') || '';
+  if (isStatelessSolo()) return view === 'solo-game' || view === 'solo-result';
+  return params.get('room') === activeRoomCode && ['lobby', 'game', 'result'].includes(view);
+}
+function activateRoom(code, snapshot, fromInitialization = false) {
   forgetSoloSession();
   activeRoomCode = code;
   pendingRoomCode = '';
   localStorage.setItem(ROOM_KEY, code);
-  history.replaceState(null, '', `?room=${encodeURIComponent(code)}`);
+  syncScreenUrl(snapshot, fromInitialization ? 'replace' : 'push', fromInitialization);
   receiveState(snapshot);
   connectEvents(code);
 }
 
-function activateSolo(snapshot) {
+function activateSolo(snapshot, fromInitialization = false) {
   activeRoomCode = snapshot.room.code;
   pendingRoomCode = '';
   localStorage.removeItem(ROOM_KEY);
-  history.replaceState(null, '', location.pathname);
+  syncScreenUrl(snapshot, fromInitialization ? 'replace' : 'push', fromInitialization);
   receiveState(snapshot);
   connectEvents(activeRoomCode);
 }
@@ -724,7 +871,7 @@ function goHome(notifyRoom = true) {
   connection = 'idle';
   forgetSoloSession();
   localStorage.removeItem(ROOM_KEY);
-  history.replaceState(null, '', location.pathname);
+  history.replaceState({ dcaScreen: 'home' }, '', screenUrl('home'));
   render();
   if (shouldReleaseLobbySeat) leaveLobbySilently(codeToLeave);
 }
@@ -988,12 +1135,13 @@ function meldHtml(group, editable) {
     ? `data-drop-zone="group" data-group-id="${escapeHtml(group.id)}"` 
     : editable && group.existing ? 'data-drop-blocked="true"' : '';
   return `
-    <article class="meld ${group.existing ? 'existing' : 'new'}" ${dropData}>
+    <article class="meld ${group.existing ? 'existing' : 'new'} ${invalidMelds.has(group.id) ? 'invalid-meld' : ''}" ${dropData}>
       <div class="meld-header"><span>${group.type === 'run' ? '연속 수열' : group.type === 'group' ? '숫자 그룹' : '새 조합'}</span>${group.existing ? '<small>보드</small>' : '<small>초안</small>'}</div>
       <div class="meld-tiles">
         ${group.tiles.map((tile) => tileHtml(tile, 'group', group.id, editable && (state.you.hasOpened || !group.existing))).join('')}
         ${canTarget ? `<button class="tile-target" data-action="add-to-group" data-group-id="${group.id}" ${selected ? '' : 'disabled'}>+<span>선택 타일</span></button>` : ''}
       </div>
+      ${invalidMelds.has(group.id) ? `<p class="meld-validation-message" role="alert">${escapeHtml(invalidMelds.get(group.id))}</p>` : ''}
     </article>`;
 }
 
@@ -1046,8 +1194,7 @@ function opponentSubmissionHistoryHtml() {
 function turnClock() {
   const turn = state.turn;
   if (!turn || state.room.phase !== 'playing') return '';
-  const renderedAt = Date.now();
-  return `<div class="seat-timer" aria-label="현재 플레이어의 턴 남은 시간"><span>남은 시간</span><strong class="turn-clock" data-deadline="${turn.deadlineAt}" data-server-now="${state.serverNow}" data-rendered-at="${renderedAt}">--:--</strong></div>`;
+  return `<div class="seat-timer" aria-label="현재 플레이어의 턴 남은 시간"><span>남은 시간</span><strong class="turn-clock" data-deadline="${turn.deadlineAt}">--:--</strong><div class="seat-timer-progress" role="progressbar" aria-label="턴 남은 시간" aria-valuemin="0" aria-valuemax="100"><div class="seat-timer-progress-fill"></div></div></div>`;
 }
 function gamePage() {
   const turn = state.turn;
@@ -1092,10 +1239,10 @@ function gamePage() {
             <div class="formula-bar"><span>fx</span><p>${opening ? '첫 등록: 손패 타일만으로 30점 이상' : canEdit ? (dirty ? '개인 초안 편집 중 · 상대에게는 아직 보이지 않음' : '보드 패를 길게 눌러 이어진 조합을 함께 잡을 수 있어요') : '보드의 유효한 조합'}</p><small>${canEdit ? `${state.room.turnSeconds}초 턴` : '읽기 전용'}</small></div>
             <div class="board-toolbar">
               <div><p class="eyebrow">TABLE</p><h2>게임 보드</h2></div>
-              ${canEdit ? `<div class="edit-tools"><span class="selected-label ${selected || batchSelection ? 'has-selection' : ''}">${escapeHtml(selectedLabel())}</span><button class="outline-button" data-action="new-group" ${selected ? '' : 'disabled'}>+ 새 조합</button>${selected?.source === 'group' ? '<button class="outline-button" data-action="to-rack">임시 손패로</button>' : ''}<button class="text-button" data-action="undo-draft" ${dirty ? '' : 'disabled'}>되돌리기</button></div>` : ''}
+              ${canEdit ? `<div class="edit-tools"><span class="selected-label ${selected || batchSelection ? 'has-selection' : ''}">${escapeHtml(selectedLabel())}</span><button class="outline-button" data-action="new-group" ${selected ? '' : 'disabled'}>+ 새 조합</button>${selected?.source === 'group' ? '<button class="outline-button" data-action="to-rack">임시 손패로</button>' : ''}<div class="rack-undo-controls"><button class="text-button" data-action="step-undo" ${undoStack.length ? '' : 'disabled'}>한 단계 취소</button><button class="text-button" data-action="step-redo" ${redoStack.length ? '' : 'disabled'}>다시 실행</button></div><button class="text-button" data-action="undo-draft" ${dirty ? '' : 'disabled'}>턴 초기화</button></div>` : ''}
             </div>
             <div class="board-grid" data-board-density="normal" role="region" tabindex="0" aria-label="게임 보드" ${canEdit ? 'data-drop-zone="board"' : ''}>${boardContent}</div>
-            <p class="board-density-status" data-board-density-status aria-live="polite" hidden></p>${canEdit ? `<p class="board-batch-status" data-board-batch-status aria-live="polite" hidden></p>` : ''}
+            ${canEdit && boardValidationMessage ? `<p class="opening-alert" role="alert">${escapeHtml(boardValidationMessage)}</p>` : ''}<p class="board-density-status" data-board-density-status aria-live="polite" hidden></p>${canEdit ? `<p class="board-batch-status" data-board-batch-status aria-live="polite" hidden></p>` : ''}
             ${canEdit && opening && state.board.length > 0 ? '<p class="opening-alert">첫 등록 전에는 기존 보드를 바꾸거나 타일을 더할 수 없습니다.</p>' : ''}
           </section>
 
@@ -1254,17 +1401,23 @@ function syncWorksheetHeaders() {
 function updateClock() {
   document.querySelectorAll('.turn-clock').forEach((clock) => {
     const deadline = Number(clock.dataset.deadline);
-    const serverNow = Number(clock.dataset.serverNow);
-    const renderedAt = Number(clock.dataset.renderedAt);
-    if (!Number.isFinite(deadline) || !Number.isFinite(serverNow) || !Number.isFinite(renderedAt)) {
+    if (!Number.isFinite(deadline)) {
       clock.textContent = '--:--';
       return;
     }
-    const initialRemaining = Math.max(0, deadline - serverNow);
-    const remaining = Math.max(0, initialRemaining - (Date.now() - renderedAt));
+    const remaining = Math.max(0, deadline - (Date.now() - serverClockOffsetMs));
     const seconds = Math.ceil(remaining / 1000);
-    clock.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+    clock.textContent = String(Math.floor(seconds / 60)).padStart(2, '0') + ':' + String(seconds % 60).padStart(2, '0');
     clock.classList.toggle('urgent', seconds <= 10);
+    const progress = clock.parentElement?.querySelector('.seat-timer-progress');
+    const fill = progress?.querySelector('.seat-timer-progress-fill');
+    const duration = Math.max(1000, Number(state?.room?.turnSeconds || 60) * 1000);
+    const percentage = Math.min(100, Math.max(0, remaining / duration * 100));
+    if (fill) fill.style.width = percentage + '%';
+    if (progress) {
+      progress.classList.toggle('urgent', seconds <= 10);
+      progress.setAttribute('aria-valuenow', String(Math.round(percentage)));
+    }
   });
 }
 setInterval(updateClock, 250);
@@ -1307,7 +1460,7 @@ function isOriginalBoardTile(tileId) {
 }
 
 function moveDraftTile(drag, destination) {
-  if (!draft || !state?.turn?.isYourTurn || !drag || !destination) return false;
+  if (!draft || !state?.turn?.isYourTurn || !drag || !destination || globalThis.turnActionInFlight) return false;
   const tileIds = dragTileIds(drag);
   if (!tileIds.length || !['rack', 'group', 'new-group'].includes(destination.type)) return false;
 
@@ -1336,6 +1489,7 @@ function moveDraftTile(drag, destination) {
   if (destination.type === 'rack' && drag.source === 'rack'
     && destination.targetTileId && tileIds.includes(destination.targetTileId)) return false;
 
+  if (typeof recordDraftHistory === 'function') recordDraftHistory();
   const tiles = tileIds.map((tileId) => takeDraftTile(drag.source, drag.groupId, tileId));
   if (tiles.some((tile) => !tile)) return false;
 
@@ -1369,13 +1523,17 @@ function compareRackTiles(left, right, mode) {
 }
 
 function sortRack(mode) {
-  if (!draft || !state?.turn?.isYourTurn) return;
+  if (!draft || !state?.turn?.isYourTurn || globalThis.turnActionInFlight) return;
   clearBatchSelection();
-  draft.rack = draft.rack
+  const sorted = draft.rack
     .map((tile, index) => ({ tile, index }))
     .sort((left, right) => compareRackTiles(left.tile, right.tile, mode) || left.index - right.index)
     .map(({ tile }) => tile);
-  rememberRackOrder(draft.rack);
+  if (sorted.some((tile, index) => tile.id !== draft.rack[index].id)) {
+    recordDraftHistory();
+    draft.rack = sorted;
+    rememberRackOrder(draft.rack);
+  }
   render();
 }
 function selectTile(button) {
@@ -1401,6 +1559,8 @@ function takeSelected() {
 }
 
 function afterDraftChange() {
+  invalidMelds.clear();
+  boardValidationMessage = '';
   clearBatchSelection();
   selected = null;
   syncDraftStatus();
@@ -1408,7 +1568,8 @@ function afterDraftChange() {
 }
 
 function createGroupFromSelected() {
-  if (!selected || !draft) return;
+  if (!selected || !draft || globalThis.turnActionInFlight) return;
+  recordDraftHistory();
   const tile = takeSelected();
   if (!tile) return;
   draft.groups.push({ id: `draft-${crypto.randomUUID().replace(/-/g, '')}`, type: '', existing: false, tiles: [tile] });
@@ -1425,6 +1586,8 @@ function addSelectedToGroup(groupId) {
     return;
   }
   if (selected.source === 'group' && selected.groupId === groupId) return;
+  if (globalThis.turnActionInFlight) return;
+  recordDraftHistory();
   const tile = takeSelected();
   if (!tile) return;
   target.tiles.push(tile);
@@ -1438,6 +1601,7 @@ function moveSelectedToRack() {
     showToast('턴 시작 시 보드에 있던 타일은 손패로 가져갈 수 없습니다.', 'error');
     return;
   }
+  recordDraftHistory();
   const tile = takeSelected();
   if (!tile) return;
   draft.rack.push(tile);
@@ -1446,14 +1610,40 @@ function moveSelectedToRack() {
 }
 
 function undoDraft() {
+  if (globalThis.turnActionInFlight) return;
   hydrateDraft(state);
   syncDraftStatus();
   render();
 }
 
+let pendingActionButtons = [];
+function setTurnActionPending(action = '') {
+  if (typeof document === 'undefined') return;
+  if (!action) {
+    pendingActionButtons.forEach(({ button, markup, disabled }) => {
+      if (!button.isConnected) return;
+      button.innerHTML = markup;
+      button.disabled = disabled;
+      button.classList.remove('action-pending');
+      button.removeAttribute('aria-busy');
+    });
+    pendingActionButtons = [];
+    return;
+  }
+  pendingActionButtons = [...document.querySelectorAll('[data-action="submit-turn"], [data-action="draw-tile"]')]
+    .map((button) => ({ button, markup: button.innerHTML, disabled: button.disabled }));
+  pendingActionButtons.forEach(({ button }) => {
+    button.disabled = true;
+    if (button.dataset.action !== action) return;
+    button.classList.add('action-pending');
+    button.setAttribute('aria-busy', 'true');
+    button.innerHTML = '<span class="action-pending-label">' + (action === 'submit-turn' ? '제출 처리 중…' : '패 뽑는 중…') + '</span>';
+  });
+}
 async function submitTurn() {
   if (globalThis.turnActionInFlight || !draft || !isDraftDirty()) return;
   globalThis.turnActionInFlight = true;
+  if (typeof setTurnActionPending === 'function') setTurnActionPending('submit-turn');
   globalThis.turnRequestEpoch = (globalThis.turnRequestEpoch || 0) + 1;
   if (typeof draftSyncTimer !== 'undefined') clearTimeout(draftSyncTimer);
   sortDraftMelds();
@@ -1479,17 +1669,20 @@ async function submitTurn() {
       draftTurnKey = attemptedTurnKey;
       selected = null;
       clearBatchSelection();
+      if (typeof invalidMelds !== 'undefined') markDraftValidation(error.message);
       syncDraftStatus();
       render();
     }
     showToast(error.message, 'error');
   } finally {
     globalThis.turnActionInFlight = false;
+    if (typeof setTurnActionPending === 'function') setTurnActionPending();
   }
 }
 async function drawTile() {
   if (globalThis.turnActionInFlight || !state?.turn?.isYourTurn) return;
   globalThis.turnActionInFlight = true;
+  if (typeof setTurnActionPending === 'function') setTurnActionPending('draw-tile');
   globalThis.turnRequestEpoch = (globalThis.turnRequestEpoch || 0) + 1;
   if (typeof draftSyncTimer !== 'undefined') clearTimeout(draftSyncTimer);
   try {
@@ -1503,6 +1696,7 @@ async function drawTile() {
     showToast(error.message, 'error');
   } finally {
     globalThis.turnActionInFlight = false;
+    if (typeof setTurnActionPending === 'function') setTurnActionPending();
   }
 }
 
@@ -1644,7 +1838,21 @@ async function copyInvite() {
   }
 }
 
+function clearDropPreview() {
+  document.querySelectorAll('.drop-preview-before, .drop-preview-after, .drop-preview-group').forEach((element) => {
+    element.classList.remove('drop-preview-before', 'drop-preview-after', 'drop-preview-group');
+  });
+}
+function paintDropPreview(target, clientX) {
+  clearDropPreview();
+  if (!target || target.dataset.dropBlocked || (target.dataset.dragTile && draggedTile?.tileIds.includes(target.dataset.tileId))) return;
+  const destination = dropDestination(target, clientX);
+  if (!destination) return;
+  if (target.dataset.dragTile) target.classList.add(destination.placeAfter ? 'drop-preview-after' : 'drop-preview-before');
+  else if (destination.type === 'group') target.classList.add('drop-preview-group');
+}
 function clearDragFeedback() {
+  clearDropPreview();
   document.querySelectorAll('.dragging, .batch-dragging, .touch-dragging, .drag-over').forEach((element) => {
     element.classList.remove('dragging', 'batch-dragging', 'touch-dragging', 'drag-over');
   });
@@ -1672,7 +1880,7 @@ function markDraggedTiles(tileIds, extraClass = '') {
 }
 
 function beginTouchTileDrag(tile, event, selectedIds = null) {
-  if (event.pointerType === 'mouse' || !tile || !draft || !state?.turn?.isYourTurn) return false;
+  if (event.pointerType === 'mouse' || !tile || !draft || !state?.turn?.isYourTurn || globalThis.turnActionInFlight) return false;
   const sourceName = tile.dataset.source;
   const groupId = tile.dataset.groupId || '';
   const tileId = tile.dataset.tileId;
@@ -1698,6 +1906,7 @@ function updateTouchTileDrag(event) {
   if (event.cancelable) event.preventDefault();
   const target = touchDropTarget(event);
   document.querySelectorAll('.drag-over').forEach((element) => element.classList.remove('drag-over'));
+  paintDropPreview(target, event.clientX);
   if (target && !target.dataset.dropBlocked && !(target.dataset.dragTile && draggedTile?.tileIds.includes(target.dataset.tileId))) {
     target.classList.add('drag-over');
   }
@@ -1724,7 +1933,7 @@ function finishTouchTileDrag(event, cancelled = false) {
 document.addEventListener('pointerdown', (event) => {
   if (event.isPrimary === false || (event.pointerType === 'mouse' && event.button !== 0)) return;
   const tile = event.target.closest('[data-drag-tile]');
-  if (!tile || !draft || !state?.turn?.isYourTurn) return;
+  if (!tile || !draft || !state?.turn?.isYourTurn || globalThis.turnActionInFlight) return;
   const source = tile.dataset.source;
   const groupId = tile.dataset.groupId || '';
   if (event.pointerType !== 'mouse' && tile.setPointerCapture) {
@@ -1802,7 +2011,7 @@ document.addEventListener('dragstart', (event) => {
     return;
   }
   const tile = event.target.closest('[data-drag-tile]');
-  if (!tile || !draft || !state?.turn?.isYourTurn) return;
+  if (!tile || !draft || !state?.turn?.isYourTurn || globalThis.turnActionInFlight) return;
   const sourceName = tile.dataset.source;
   const groupId = tile.dataset.groupId || '';
   const tileId = tile.dataset.tileId;
@@ -1827,9 +2036,13 @@ document.addEventListener('dragstart', (event) => {
 document.addEventListener('dragover', (event) => {
   if (!draggedTile) return;
   const target = event.target.closest('[data-drag-tile], [data-drop-zone], [data-drop-blocked]');
-  if (!target || target.dataset.dropBlocked) return;
+  if (!target || target.dataset.dropBlocked) {
+    clearDropPreview();
+    return;
+  }
   event.preventDefault();
   event.dataTransfer.dropEffect = 'move';
+  paintDropPreview(target, event.clientX);
   document.querySelectorAll('.drag-over').forEach((element) => element.classList.remove('drag-over'));
   if (!(target.dataset.dragTile && draggedTile.tileIds.includes(target.dataset.tileId))) target.classList.add('drag-over');
 });
@@ -1866,6 +2079,7 @@ document.addEventListener('click', (event) => {
   const button = event.target.closest('[data-action]');
   if (!button || button.disabled) return;
   const action = button.dataset.action;
+  if (globalThis.turnActionInFlight && ['select-tile', 'new-group', 'add-to-group', 'to-rack', 'undo-draft', 'step-undo', 'step-redo', 'sort-rack'].includes(action)) return;
   if (action === 'select-tile' && (Date.now() - lastDragAt < 260 || Date.now() < suppressTileClickUntil)) return;
   if (action === 'home') goHome();
   if (action === 'theme') applyTheme(button.dataset.theme);
@@ -1878,6 +2092,8 @@ document.addEventListener('click', (event) => {
   if (action === 'add-to-group') addSelectedToGroup(button.dataset.groupId);
   if (action === 'to-rack') moveSelectedToRack();
   if (action === 'undo-draft') undoDraft();
+  if (action === 'step-undo') stepUndo();
+  if (action === 'step-redo') stepRedo();
   if (action === 'submit-turn') submitTurn();
   if (action === 'draw-tile') drawTile();
   if (action === 'sort-rack') sortRack(button.dataset.sort);
@@ -1899,26 +2115,32 @@ async function ensureGuestSession() {
 
 async function init() {
   applyTheme(theme(), false);
+  const initEpoch = globalThis.gameViewEpoch || 0;
   await ensureGuestSession();
-  const savedSolo = pendingRoomCode ? '' : sessionStorage.getItem(SOLO_SESSION_KEY);
-  if (savedSolo) {
-    soloSessionToken = savedSolo;
-    try {
-      const snapshot = await soloApi('state');
-      activateSolo(snapshot);
-      return;
-    } catch {
-      forgetSoloSession();
+  if (initEpoch !== (globalThis.gameViewEpoch || 0)) return;
+  const params = new URLSearchParams(location.search);
+  const requestedView = params.get('view') || '';
+  const requestedCode = shortCode(params.get('room'));
+  const requestedSolo = requestedView === 'solo-game' || requestedView === 'solo-result';
+  if (requestedSolo) {
+    const savedSolo = sessionStorage.getItem(SOLO_SESSION_KEY);
+    if (savedSolo) {
+      soloSessionToken = savedSolo;
+      try {
+        const snapshot = await soloApi('state');
+        activateSolo(snapshot, true);
+        return;
+      } catch {
+        forgetSoloSession();
+      }
     }
   }
-  const saved = localStorage.getItem(ROOM_KEY);
-  const code = pendingRoomCode || saved;
-  if (code) {
+  if (requestedCode) {
     try {
-      const snapshot = await api(`/api/rooms/${shortCode(code)}?clientId=${encodeURIComponent(clientId)}`);
-      if (snapshot.you) activateRoom(shortCode(code), snapshot);
+      const snapshot = await api('/api/rooms/' + requestedCode + '?clientId=' + encodeURIComponent(clientId));
+      if (snapshot.you) activateRoom(requestedCode, snapshot, true);
       else {
-        pendingRoomCode = shortCode(code);
+        pendingRoomCode = requestedCode;
         render();
       }
       return;
@@ -1927,9 +2149,21 @@ async function init() {
       pendingRoomCode = '';
     }
   }
+  forgetSoloSession();
+  localStorage.removeItem(ROOM_KEY);
+  history.replaceState({ dcaScreen: 'home' }, '', screenUrl('home'));
   render();
 }
 
+window.addEventListener('popstate', () => {
+  if (state?.you) {
+    goHome();
+    return;
+  }
+  pendingRoomCode = '';
+  history.replaceState({ dcaScreen: 'home' }, '', screenUrl('home'));
+  render();
+});
 init();
 
 
@@ -1944,3 +2178,8 @@ window.addEventListener('pagehide', () => {
   }
 });
 window.addEventListener('pageshow', (event) => { if (event.persisted) void refreshRoomState(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !activeRoomCode) return;
+  updateClock();
+  void refreshRoomState();
+});
