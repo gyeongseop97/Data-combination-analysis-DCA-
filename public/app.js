@@ -801,7 +801,7 @@ function syncMatchChatSession(snapshot) {
   if (matchChatUi?.roomCode === snapshot.room.code) return;
   // Deliberately memory-only: no chat text/history survives leaving this match.
   matchChatUi = { roomCode: snapshot.room.code, text: '', sending: false, attempt: null,
-    error: '', scrollTop: 0, stickToBottom: true, composing: false, ignoreEnterUntil: 0 };
+    error: '', scrollTop: 0, stickToBottom: true, composing: false };
 }
 
 function mergeChatMessages(current = [], incoming = []) {
@@ -888,7 +888,7 @@ function updateMatchChat(forceBottom = false) {
 
 async function sendMatchChat(form) {
   if (!chatAvailable() || !matchChatUi || matchChatUi.sending
-    || matchChatUi.composing || Date.now() < matchChatUi.ignoreEnterUntil) return;
+    || matchChatUi.composing) return;
   const ui = matchChatUi;
   const input = form.elements.message;
   const originalText = input.value;
@@ -1342,6 +1342,21 @@ function colorName(color) {
   return ({ red: '빨강', blue: '파랑', orange: '주황', black: '검정' })[color] || '';
 }
 
+function colorSymbolName(color) {
+  return ({ red: '원', blue: '삼각형', orange: '마름모', black: '사각형' })[color] || '';
+}
+
+function tileColorSymbol(color) {
+  const shapes = {
+    red: '<circle cx="6" cy="6" r="5" />',
+    blue: '<path d="M6 0 12 12H0Z" />',
+    orange: '<path d="m6 0 6 6-6 6-6-6Z" />',
+    black: '<path d="M1 1h10v10H1Z" />',
+  };
+  if (!shapes[color]) return '';
+  return `<svg class="tile-color-symbol" data-color-symbol="${color}" viewBox="0 0 12 12" aria-hidden="true" focusable="false">${shapes[color]}</svg>`;
+}
+
 function latestOpponentSubmission() {
   return (state?.recentSubmissions || []).find((entry) => entry?.player?.id && entry.player.id !== state?.you?.id) || null;
 }
@@ -1366,8 +1381,9 @@ function tileHtml(tile, source, groupId, editable) {
   const tag = editable ? 'button' : 'span';
   const data = editable ? `data-action="select-tile" data-source="${source}" data-group-id="${escapeHtml(groupId || '')}" data-tile-id="${tile.id}"` : '';
   const drag = editable ? 'draggable="true" data-drag-tile="true"' : '';
-  const description = `${faceDescription(tile)}${highlight.label ? ` · ${highlight.label}` : ''}`;
-  return `<${tag} class="tile ${color} ${selectedHere ? 'selected' : ''} ${batchSelected ? 'batch-selected' : ''} ${highlight.className}" ${data} ${drag} aria-label="${description}" title="${description}"><b>${tile.kind === 'joker' ? '★' : tile.value}</b>${resolved}<i></i></${tag}>`;
+  const symbol = tile.kind === 'joker' ? '' : tileColorSymbol(tile.color);
+  const description = `${faceDescription(tile)}${symbol ? ` · ${colorSymbolName(tile.color)} 표시` : ''}${highlight.label ? ` · ${highlight.label}` : ''}`;
+  return `<${tag} class="tile ${color} ${selectedHere ? 'selected' : ''} ${batchSelected ? 'batch-selected' : ''} ${highlight.className}" ${data} ${drag} aria-label="${description}" title="${description}">${symbol}<b>${tile.kind === 'joker' ? '★' : tile.value}</b>${resolved}</${tag}>`;
 }
 function meldHtml(group, editable) {
   const canTarget = editable && (state.you.hasOpened || !group.existing);
@@ -2345,12 +2361,17 @@ document.addEventListener('compositionstart', (event) => {
 document.addEventListener('compositionend', (event) => {
   if (event.target.id !== 'matchChatInput' || !matchChatUi) return;
   matchChatUi.composing = false;
-  matchChatUi.ignoreEnterUntil = Date.now() + 100;
   setTimeout(flushInteractiveRender, 0);
 });
 document.addEventListener('keydown', (event) => {
-  if (event.target.id === 'matchChatInput' && event.key === 'Enter'
-    && (event.isComposing || event.keyCode === 229 || matchChatUi?.composing)) event.preventDefault();
+  if (event.target.id !== 'matchChatInput'
+    || (event.key !== 'Enter' && event.code !== 'Enter' && event.code !== 'NumpadEnter')) return;
+  // Handle Enter directly instead of depending on the browser's implicit form
+  // submit. IME confirmation must finish first, but the next Enter must work
+  // immediately; a time-based guard also swallowed deliberate sends/clicks.
+  event.preventDefault();
+  if (event.isComposing || event.keyCode === 229 || matchChatUi?.composing || event.repeat) return;
+  void sendMatchChat(event.target.form);
 });
 document.addEventListener('submit', (event) => {
   if (event.target.id === 'soloGameForm') { event.preventDefault(); startSoloGame(event.target); }

@@ -85,6 +85,48 @@ const server = http.createServer((request, response) => {
     assert.equal(await first.host.locator('[data-chat-messages] img, [data-chat-messages] script').count(), 0, 'chat text created HTML elements');
     assert.equal(await first.host.evaluate(() => window.__chatXss), undefined);
     console.log('PASS bidirectional Korean chat on either turn and literal HTML/XSS safety via normal polling');
+    const chatRequests = [];
+    first.host.on('request', request => {
+      if (request.method() !== 'POST' || !request.url().endsWith('/action')) return;
+      const payload = request.postDataJSON();
+      if (payload?.action === 'chat') chatRequests.push(payload);
+    });
+    await first.host.waitForTimeout(850);
+    await input(first.host).fill('한글 확정 후 바로 엔터');
+    await input(first.host).evaluate(element => {
+      element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '터' }));
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', isComposing: true, bubbles: true, cancelable: true }));
+      // The UI composing flag also protects engines that omit isComposing.
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+      element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '터' }));
+      // Safari can end composition before the confirming Enter, retaining 229.
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 229, bubbles: true, cancelable: true }));
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', repeat: true, bubbles: true, cancelable: true }));
+    });
+    await first.host.waitForTimeout(120);
+    assert.equal(chatRequests.length, 0, 'IME confirmation or held Enter sent chat prematurely');
+    assert.equal(await input(first.host).inputValue(), '한글 확정 후 바로 엔터');
+    await input(first.host).evaluate(element => {
+      element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '터' }));
+      element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '터' }));
+      // Deliberate non-composing Enter in the same task must not hit a timer guard.
+      element.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+    });
+    await receive(first.guest, '한글 확정 후 바로 엔터');
+    assert.equal(chatRequests.length, 1);
+    assert.equal(await input(first.host).inputValue(), '');
+    assert.equal(first.room.chatMessages.filter(message => message.text === '한글 확정 후 바로 엔터').length, 1);
+    await first.host.waitForTimeout(850);
+    await input(first.host).fill('조합 확정 직후 버튼도 전송');
+    await input(first.host).evaluate(element => {
+      element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '송' }));
+      element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '송' }));
+      element.form.querySelector('button[type="submit"]').click();
+    });
+    await receive(first.guest, '조합 확정 직후 버튼도 전송');
+    assert.equal(chatRequests.length, 2);
+    assert.equal(await input(first.host).inputValue(), '');
+    console.log('PASS explicit Enter send, IME/229 protection, held-key suppression, and immediate post-composition Enter/button send');
 
     const hostPlayer = first.room.players.find(player => player.id === first.room.hostId);
     const guestPlayer = first.room.players.find(player => player.id !== first.room.hostId);
@@ -142,6 +184,9 @@ const server = http.createServer((request, response) => {
     await input(first.host).fill('응답 도착 중 조합');
     await input(first.host).press('Enter');
     await chatReplyReady;
+    await input(first.host).press('Enter');
+    await input(first.host).press('Enter');
+    assert.equal(chatRequests.filter(payload => payload.text === '응답 도착 중 조합').length, 1, 'repeated Enter sent duplicate requests while awaiting acknowledgement');
     await input(first.host).evaluate(element => element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, data: '한' })));
     releaseChatReply();
     await first.host.waitForFunction(() => !document.querySelector('#matchChatForm button[type="submit"]').disabled);
