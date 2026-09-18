@@ -64,6 +64,7 @@ let publicRooms = [];
 let publicRoomsStatus = 'idle';
 let publicRoomsRefreshTimer = null;
 let publicRoomsRequestInFlight = false;
+let matchChatUi = null;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (character) => ({
@@ -146,15 +147,16 @@ function applyTheme(nextTheme, shouldRender = true) {
 }
 
 async function api(path, options = {}) {
+  const { independentOfTurn = false, ...fetchOptions } = options;
   const viewEpoch = globalThis.gameViewEpoch || 0;
   const turnEpoch = globalThis.turnRequestEpoch || 0;
   const response = await fetch(path, {
     credentials: 'same-origin',
-    ...options,
+    ...fetchOptions,
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
   });
   const data = await response.json().catch(() => ({}));
-  if (viewEpoch !== (globalThis.gameViewEpoch || 0) || turnEpoch !== (globalThis.turnRequestEpoch || 0)) {
+  if (viewEpoch !== (globalThis.gameViewEpoch || 0) || (!independentOfTurn && turnEpoch !== (globalThis.turnRequestEpoch || 0))) {
     const error = new Error('이전 화면의 응답입니다.'); error.stale = true; throw error;
   }
   if (!response.ok) { const error = new Error(data.error || '요청을 처리하지 못했습니다.'); error.status = response.status; throw error; }
@@ -790,6 +792,136 @@ function syncDraftStatus() {
   }, 120);
 }
 
+function chatAvailable(snapshot = state) {
+  return Boolean(snapshot?.you && snapshot.room?.mode === 'multiplayer' && snapshot.room.phase === 'playing');
+}
+
+function syncMatchChatSession(snapshot) {
+  if (!chatAvailable(snapshot)) { matchChatUi = null; return; }
+  if (matchChatUi?.roomCode === snapshot.room.code) return;
+  // Deliberately memory-only: no chat text/history survives leaving this match.
+  matchChatUi = { roomCode: snapshot.room.code, text: '', sending: false, attempt: null,
+    error: '', scrollTop: 0, stickToBottom: true, composing: false, ignoreEnterUntil: 0 };
+}
+
+function mergeChatMessages(current = [], incoming = []) {
+  const messages = new Map(current.map((entry) => [entry.id, entry]));
+  for (const entry of incoming) messages.set(entry.id, entry);
+  return [...messages.values()].sort((left, right) => left.sentAt - right.sentAt).slice(-100);
+}
+
+function gameplayDigest(snapshot) {
+  if (!snapshot) return '';
+  const { serverNow, chatMessages, ...game } = snapshot;
+  const { revision, ...room } = game.room || {};
+  return JSON.stringify({ ...game, room });
+}
+
+function chatMessagesHtml() {
+  const messages = state?.chatMessages || [];
+  if (!messages.length) return '<p class="chat-empty">같은 판의 참가자와<br>대화해 보세요.</p>';
+  return messages.map((entry) => {
+    const mine = entry.playerId === state.you.id;
+    const date = new Date(entry.sentAt);
+    const time = Number.isFinite(date.getTime())
+      ? String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0') : '';
+    return `<article class="chat-message ${mine ? 'mine' : ''}" data-chat-message="${escapeHtml(entry.id)}"><header><strong>${escapeHtml(entry.playerName)}${mine ? ' · 나' : ''}</strong><time>${time}</time></header><p>${escapeHtml(entry.text)}</p></article>`;
+  }).join('');
+}
+
+function matchChatHtml() {
+  if (!chatAvailable()) return '';
+  return `<aside class="match-chat" data-match-chat data-room-code="${escapeHtml(state.room.code)}" aria-label="이번 판 실시간 채팅">
+    <header class="chat-heading"><div><span class="chat-live-dot" aria-hidden="true"></span><h2>실시간 채팅</h2></div><span>이 판의 참가자만</span></header>
+    <div class="chat-messages" data-chat-messages role="log" aria-label="채팅 메시지" aria-live="polite" aria-relevant="additions" tabindex="0">${chatMessagesHtml()}</div>
+    <form id="matchChatForm" autocomplete="off"><label class="chat-input-label" for="matchChatInput">메시지</label><div class="chat-compose"><input id="matchChatInput" name="message" type="text" maxlength="300" placeholder="메시지 입력…" value="${escapeHtml(matchChatUi?.text || '')}" aria-describedby="chatPrivacyNote" /><button type="submit" ${matchChatUi?.sending ? 'disabled' : ''}>${matchChatUi?.sending ? '전송 중' : '전송'}</button></div><p class="chat-feedback" data-chat-feedback role="status">${escapeHtml(matchChatUi?.error || '')}</p></form>
+    <p class="chat-privacy" id="chatPrivacyNote">이번 판에서만 보관 · 종료 시 삭제 · 최근 100개</p>
+  </aside>`;
+}
+
+function captureChatView() {
+  const panel = document.querySelector('[data-match-chat]');
+  if (!matchChatUi || panel?.dataset.roomCode !== matchChatUi.roomCode) return null;
+  const input = panel.querySelector('input[name="message"]');
+  const messages = panel.querySelector('[data-chat-messages]');
+  matchChatUi.text = input.value;
+  if (messages.clientHeight) {
+    matchChatUi.scrollTop = messages.scrollTop;
+    matchChatUi.stickToBottom = messages.scrollHeight - messages.clientHeight - messages.scrollTop < 32;
+  }
+  return { roomCode: matchChatUi.roomCode, focused: document.activeElement === input,
+    start: input.selectionStart, end: input.selectionEnd, direction: input.selectionDirection };
+}
+
+function restoreChatView(view) {
+  const panel = document.querySelector('[data-match-chat]');
+  if (!matchChatUi || panel?.dataset.roomCode !== matchChatUi.roomCode) return;
+  const input = panel.querySelector('input[name="message"]');
+  const messages = panel.querySelector('[data-chat-messages]');
+  input.value = matchChatUi.text;
+  messages.scrollTop = matchChatUi.stickToBottom ? messages.scrollHeight : matchChatUi.scrollTop;
+  if (view?.focused && view.roomCode === matchChatUi.roomCode) {
+    input.focus({ preventScroll: true });
+    input.setSelectionRange(view.start, view.end, view.direction);
+  }
+}
+
+function updateMatchChat(forceBottom = false) {
+  const panel = document.querySelector('[data-match-chat]');
+  if (!matchChatUi || panel?.dataset.roomCode !== matchChatUi.roomCode || !chatAvailable()) return;
+  captureChatView();
+  const messages = panel.querySelector('[data-chat-messages]');
+  const entries = state.chatMessages || [];
+  const key = entries.length + ':' + (entries.at(-1)?.id || '');
+  if (messages.dataset.chatKey !== key) {
+    messages.innerHTML = chatMessagesHtml();
+    messages.dataset.chatKey = key;
+  }
+  if (forceBottom) matchChatUi.stickToBottom = true;
+  messages.scrollTop = matchChatUi.stickToBottom ? messages.scrollHeight : matchChatUi.scrollTop;
+  const button = panel.querySelector('button[type="submit"]');
+  button.disabled = matchChatUi.sending;
+  button.textContent = matchChatUi.sending ? '전송 중' : '전송';
+  panel.querySelector('[data-chat-feedback]').textContent = matchChatUi.error;
+  // Do not touch the input DOM/value here: incoming messages must not interrupt IME.
+}
+
+async function sendMatchChat(form) {
+  if (!chatAvailable() || !matchChatUi || matchChatUi.sending
+    || matchChatUi.composing || Date.now() < matchChatUi.ignoreEnterUntil) return;
+  const ui = matchChatUi;
+  const input = form.elements.message;
+  const originalText = input.value;
+  const text = originalText.trim();
+  if (!text) return;
+  if ([...text].length > 300) { ui.error = '메시지는 300자까지 입력할 수 있습니다.'; updateMatchChat(); return; }
+  if (!ui.attempt || ui.attempt.text !== text) ui.attempt = { text, clientMessageId: crypto.randomUUID() };
+  const attempt = ui.attempt;
+  const code = ui.roomCode;
+  ui.sending = true;
+  ui.error = '';
+  updateMatchChat();
+  try {
+    const response = await api(`/api/rooms/${code}/action`, {
+      method: 'POST', independentOfTurn: true,
+      body: JSON.stringify({ clientId, action: 'chat', ...attempt }),
+    });
+    if (matchChatUi !== ui || !chatAvailable() || state.room.code !== code) return;
+    state.chatMessages = mergeChatMessages(state.chatMessages, response.chatMessages);
+    ui.attempt = null;
+    const currentInput = document.querySelector('#matchChatInput');
+    if (!ui.composing && currentInput?.value === originalText) {
+      currentInput.value = '';
+      ui.text = '';
+    }
+    updateMatchChat(true);
+  } catch (error) {
+    if (matchChatUi !== ui || error.stale) return;
+    ui.error = error.message || '전송하지 못했습니다. 다시 전송해 주세요.';
+  } finally {
+    if (matchChatUi === ui) { ui.sending = false; updateMatchChat(); }
+  }
+}
 function stateDigest(snapshot) {
   if (!snapshot) return '';
   const { serverNow: _serverNow, ...stableState } = snapshot;
@@ -797,6 +929,11 @@ function stateDigest(snapshot) {
 }
 
 function receiveState(nextState) {
+  if (chatAvailable(state) && chatAvailable(nextState) && state.room.code === nextState.room.code) {
+    nextState = { ...nextState, chatMessages: mergeChatMessages(state.chatMessages, nextState.chatMessages) };
+  }
+  const chatOnly = Boolean(state && gameplayDigest(state) === gameplayDigest(nextState));
+  syncMatchChatSession(nextState);
   const keepDraft = Boolean(
     draft
     && nextState?.turn?.isYourTurn
@@ -816,6 +953,7 @@ function receiveState(nextState) {
   if (activeRoomCode && previousPhase && previousPhase !== nextState?.room?.phase) syncScreenUrl(nextState);
   if (Number.isFinite(Number(nextState?.serverNow))) serverClockOffsetMs = Date.now() - Number(nextState.serverNow);
   latestStateDigest = stateDigest(nextState);
+  if (chatOnly) { updateMatchChat(); renderConnectionOnly(); return; }
   if (!keepDraft && !keepRackInteraction) {
     draggedTile = null;
     touchDrag = null;
@@ -962,6 +1100,7 @@ function goHome(notifyRoom = true) {
   stopRoomStateRefresh();
   latestStateDigest = '';
   state = null;
+  matchChatUi = null;
   draft = null;
   selected = null;
   activeRoomCode = '';
@@ -1329,7 +1468,7 @@ function gamePage() {
         <div class="worksheet-corner" aria-hidden="true"></div>
         <div class="workbook-column-headers" aria-hidden="true">${columnHeaders}</div>
         <div class="workbook-row-headers" aria-hidden="true">${rowHeaders}</div>
-        <div class="workbook-sheet-content">
+        <div class="workbook-sheet-content ${chatAvailable() ? 'has-match-chat' : ''}">
           <div class="sheet-menu" aria-hidden="true"><span>파일</span><span>편집</span><span>보기</span><span>게임</span><div></div><small>공유됨 · 자동 저장됨</small></div>
           <section class="game-banner">
             <div class="room-label"><span class="eyebrow">${soloMode ? 'AI PRACTICE' : `ROOM ${state.room.code}`}</span><div class="room-title-row"><h1>${escapeHtml(GAME_TITLE)}</h1>${forfeitNoticeHtml()}<button class="game-home-button" type="button" data-action="home" aria-label="게임을 나가 첫 화면으로" title="첫 화면으로"><span aria-hidden="true">⌂</span><span>홈</span></button><button class="game-theme-button" type="button" data-action="theme" data-theme="${theme() === 'sheet' ? 'classic' : 'sheet'}">${theme() === 'sheet' ? '기본' : '엑셀'}</button></div></div>
@@ -1358,6 +1497,7 @@ function gamePage() {
             ${canEdit ? `<p class="turn-note">${opening ? '첫 등록은 30점 이상이어야 합니다. 손패와 새 조합은 드래그로 정리할 수 있어요.' : '타일을 드래그해 조합·손패 사이를 옮길 수 있고, 제출 시 조합은 서버가 검증합니다.'}</p>` : ''}
           </section>
           <section class="activity-card"><p class="eyebrow">ACTIVITY</p><div>${state.log.slice(0, 4).map((item) => `<span>${escapeHtml(item.text)}</span>`).join('')}</div></section>
+          ${matchChatHtml()}
         </div>
       </div>
       <footer class="workbook-bottom-bar" aria-hidden="true"><span class="workbook-status">준비 · 자동 저장됨</span><div class="workbook-sheets"><b>기록</b><b class="active">게임</b><b class="new-sheet">＋</b></div><div class="workbook-views"><span>▦</span><span>▤</span><i></i><small>100%</small><span>＋</span></div></footer>
@@ -1469,7 +1609,14 @@ function restoreScrollState(snapshot, sequence) {
 }
 
 function render() {
+  if (matchChatUi?.composing && chatAvailable()
+    && document.querySelector('[data-match-chat]')?.dataset.roomCode === matchChatUi.roomCode) {
+    pendingInteractiveRender = true;
+    updateMatchChat();
+    return;
+  }
   pendingInteractiveRender = false;
+  const chatView = captureChatView();
   const scrollState = captureScrollState();
   const sequence = ++renderSequence;
   document.body.dataset.theme = theme();
@@ -1477,6 +1624,7 @@ function render() {
   else if (!state.you) app.innerHTML = homePage();
   else if (state.room.phase === 'lobby') app.innerHTML = lobbyPage();
   else app.innerHTML = gamePage();
+  restoreChatView(chatView);
   updateClock();
   fitBoardDensity();
   restoreScrollState(scrollState, sequence);
@@ -2194,11 +2342,28 @@ document.addEventListener('dragend', () => {
   clearDragFeedback();
   flushInteractiveRender();
 });
+document.addEventListener('input', (event) => {
+  if (event.target.id === 'matchChatInput' && matchChatUi) matchChatUi.text = event.target.value;
+});
+document.addEventListener('compositionstart', (event) => {
+  if (event.target.id === 'matchChatInput' && matchChatUi) matchChatUi.composing = true;
+});
+document.addEventListener('compositionend', (event) => {
+  if (event.target.id !== 'matchChatInput' || !matchChatUi) return;
+  matchChatUi.composing = false;
+  matchChatUi.ignoreEnterUntil = Date.now() + 100;
+  setTimeout(flushInteractiveRender, 0);
+});
+document.addEventListener('keydown', (event) => {
+  if (event.target.id === 'matchChatInput' && event.key === 'Enter'
+    && (event.isComposing || event.keyCode === 229 || matchChatUi?.composing)) event.preventDefault();
+});
 document.addEventListener('submit', (event) => {
   if (event.target.id === 'soloGameForm') { event.preventDefault(); startSoloGame(event.target); }
   if (event.target.id === 'createRoomForm') { event.preventDefault(); createRoom(event.target); }
   if (event.target.id === 'joinRoomForm') { event.preventDefault(); joinRoom(event.target); }
   if (event.target.id === 'roomSettingsForm') { event.preventDefault(); saveSettings(event.target); }
+  if (event.target.id === 'matchChatForm') { event.preventDefault(); void sendMatchChat(event.target); }
 });
 
 document.addEventListener('click', (event) => {

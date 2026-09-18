@@ -72,6 +72,138 @@ process.env.DCA_SESSION_SECRET = 'test-secret';
 const service = require('../lib/room-service');
 const store = require('../lib/room-store');
 
+async function verifyDurableChat() {
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  const chatHost = { id: 'guest-chat-host-aaaaaaaaaaaaaaaaaaaa' };
+  const chatGuest = { id: 'guest-chat-guest-bbbbbbbbbbbbbbbbbb' };
+  const chatObserver = { id: 'guest-chat-observer-ccccccccccccccc' };
+  try {
+    const room = await service.createRoom(chatHost, {
+      playerName: '채팅 방장', maxPlayers: 2, turnSeconds: 300, visibility: 'public',
+    });
+    const lobbyPreview = await service.roomState(chatObserver, room.roomCode);
+    assert.ok(!lobbyPreview.chatMessages, 'public lobby previews must not expose conversations');
+    await service.joinRoom(chatGuest, room.roomCode, { playerName: '채팅 참가자' });
+    await assert.rejects(() => service.roomAction(chatHost, room.roomCode, {
+      action: 'chat', text: '아직 시작 전', clientMessageId: 'durable-lobby-001',
+    }));
+    await service.roomAction(chatHost, room.roomCode, { action: 'start' });
+
+    const waiting = await store.getRoom(room.roomCode);
+    waiting.activeIndex = 0;
+    waiting.turnDirty = true;
+    waiting.deadlineAt = now - 1;
+    await store.saveRoom(waiting, waiting.revision);
+    const before = JSON.stringify({
+      players: waiting.players, board: waiting.board, deck: waiting.deck,
+      activeIndex: waiting.activeIndex, deadlineAt: waiting.deadlineAt,
+      turnDirty: waiting.turnDirty, log: waiting.log, aiDueAt: waiting.aiDueAt,
+    });
+    const scheduleCount = scheduledRequests.length;
+    const outgoing = {
+      action: 'chat', text: '  저장된 대전 전용 메시지 <b>안녕</b>  ',
+      clientMessageId: 'durable-message-01',
+      playerId: chatHost.id, playerName: '사칭 방장', sentAt: 1,
+    };
+    const sent = await service.roomAction(chatGuest, room.roomCode, outgoing);
+    assert.equal(sent.chatMessages.length, 1);
+    assert.equal(sent.chatMessages[0].playerId, chatGuest.id);
+    assert.equal(sent.chatMessages[0].playerName, '채팅 참가자');
+    assert.equal(sent.chatMessages[0].text, '저장된 대전 전용 메시지 <b>안녕</b>');
+    let stored = await store.getRoom(room.roomCode);
+    assert.deepEqual(stored.chatMessages, sent.chatMessages, 'chat survives serialization between serverless requests');
+    assert.equal(JSON.stringify({
+      players: stored.players, board: stored.board, deck: stored.deck,
+      activeIndex: stored.activeIndex, deadlineAt: stored.deadlineAt,
+      turnDirty: stored.turnDirty, log: stored.log, aiDueAt: stored.aiDueAt,
+    }), before, 'chat must not advance a turn even if its deadline just elapsed');
+    assert.equal(scheduledRequests.length, scheduleCount, 'sending chat does not enqueue turn/AI jobs');
+    const revision = stored.revision;
+    const duplicate = await service.roomAction(chatGuest, room.roomCode, { ...outgoing, text: '재전송' });
+    assert.deepEqual(duplicate.chatMessages, sent.chatMessages);
+    assert.equal((await store.getRoom(room.roomCode)).revision, revision, 'duplicate retries do not rewrite the match');
+    await assert.rejects(() => service.roomAction(chatGuest, room.roomCode, {
+      action: 'chat', text: '너무 빠른 메시지', clientMessageId: 'durable-too-fast',
+    }), error => error.statusCode === 429);
+    assert.equal((await store.getRoom(room.roomCode)).chatMessages.length, 1);
+
+    // Restore the turn for regular state polls, which intentionally process timeouts.
+    stored.deadlineAt = now + 300000;
+    await store.saveRoom(stored, stored.revision);
+    const reloadedView = await service.roomState(chatHost, room.roomCode);
+    assert.deepEqual(reloadedView.chatMessages, sent.chatMessages);
+    await assert.rejects(() => service.roomState(chatObserver, room.roomCode), error => error.statusCode === 404);
+    await assert.rejects(() => service.roomAction(chatObserver, room.roomCode, {
+      action: 'chat', text: '외부 참가자', clientMessageId: 'durable-outsider',
+    }));
+    const separate = await service.createRoom(chatObserver, { playerName: '다른 방', turnSeconds: 300 });
+    assert.deepEqual(separate.state.chatMessages, []);
+    await service.leaveRoom(chatObserver, separate.roomCode);
+
+    // Replacement AI cannot inherit permission to impersonate the departed sender.
+    await service.leaveRoom(chatGuest, room.roomCode);
+    const continued = await service.roomState(chatHost, room.roomCode);
+    assert.deepEqual(continued.chatMessages, sent.chatMessages, 'AI continuation belongs to the current match');
+    await assert.rejects(() => service.roomAction(chatGuest, room.roomCode, {
+      action: 'chat', text: '퇴장 후', clientMessageId: 'durable-departed',
+    }));
+    const replacement = continued.room.players.find(player => player.isBot);
+    await assert.rejects(() => service.roomAction({ id: replacement.id }, room.roomCode, {
+      action: 'chat', text: 'AI 사칭', clientMessageId: 'durable-bot-send',
+    }));
+
+    // Clear the actual stored message text on completion, not just the UI response.
+    stored = await store.getRoom(room.roomCode);
+    stored.activeIndex = 0;
+    stored.aiDueAt = null;
+    stored.deck = [];
+    stored.emptyPoolPasses = stored.players.length - 1;
+    await store.saveRoom(stored, stored.revision);
+    const finished = await service.roomAction(chatHost, room.roomCode, { action: 'draw' });
+    assert.equal(finished.room.phase, 'finished');
+    assert.deepEqual(finished.chatMessages, []);
+    assert.deepEqual((await store.getRoom(room.roomCode)).chatMessages, []);
+    assert.equal(JSON.stringify(await store.getRoom(room.roomCode)).includes(outgoing.text.trim()), false);
+    await assert.rejects(() => service.roomAction(chatHost, room.roomCode, {
+      action: 'chat', text: '끝난 뒤', clientMessageId: 'durable-finished',
+    }));
+    await service.leaveRoom(chatHost, room.roomCode);
+    assert.equal(await store.getRoom(room.roomCode), null);
+
+    // Durable rate limits must apply across separate requests, independently of turns.
+    const rateHost = { id: 'guest-chat-rate-aaaaaaaaaaaaaaaaaaaa' };
+    const rateGuest = { id: 'guest-chat-rate-bbbbbbbbbbbbbbbbbbbb' };
+    const rateRoom = await service.createRoom(rateHost, { playerName: '제한 확인', turnSeconds: 300 });
+    await service.joinRoom(rateGuest, rateRoom.roomCode, { playerName: '수신 확인' });
+    await service.roomAction(rateHost, rateRoom.roomCode, { action: 'start' });
+    for (let index = 0; index < 30; index += 1) {
+      now += 750;
+      await service.roomAction(rateHost, rateRoom.roomCode, {
+        action: 'chat', text: `메시지 ${index}`, clientMessageId: `rate-message-${index}`,
+      });
+    }
+    now += 750;
+    await assert.rejects(() => service.roomAction(rateHost, rateRoom.roomCode, {
+      action: 'chat', text: '31번째 요청', clientMessageId: 'rate-message-31',
+    }), error => error.statusCode === 429);
+    assert.equal((await store.getRoom(rateRoom.roomCode)).chatMessages.length, 30);
+    // The other sender has a separate limit, and the board action bucket is separate.
+    const otherSender = await service.roomAction(rateGuest, rateRoom.roomCode, {
+      action: 'chat', text: '상대 메시지', clientMessageId: 'rate-other-sender',
+    });
+    assert.equal(otherSender.chatMessages.length, 31);
+    const activeId = otherSender.turn.activePlayerId;
+    assert.equal((await service.roomAction({ id: activeId }, rateRoom.roomCode, { action: 'draw' })).room.phase, 'playing');
+    await service.leaveRoom(rateGuest, rateRoom.roomCode);
+    await service.leaveRoom(rateHost, rateRoom.roomCode);
+    assert.equal(await store.getRoom(rateRoom.roomCode), null, 'deleting a match deletes its conversation');
+    console.log('Redis chat authorization, serialization, rate limits and deletion lifecycle: passed');
+  } finally {
+    Date.now = realNow;
+  }
+}
 async function run() {
   const host = { id: 'guest-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' };
   const guest = { id: 'guest-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' };
@@ -259,6 +391,7 @@ async function run() {
   assert.equal(await store.getRoom(delayedDelivery.roomCode), null);
   assert.equal((await service.scheduledAction({ roomCode: delayedDelivery.roomCode, kind: 'departure', playerId: host.id })).accepted, false);
   console.log('AI takeover scheduling, preserved forfeit, delayed close and reconnect: passed');
+  await verifyDurableChat();
   console.log('Redis-backed room service smoke test: passed');
 }
 

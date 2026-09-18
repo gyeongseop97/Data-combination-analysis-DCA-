@@ -203,6 +203,9 @@ function roomView(room, viewerId) {
     continuationResult: room.continuationResult || null,
     departures: room.departures || [],
     log: room.log,
+    chatMessages: viewer && !viewer.isBot && room.phase === 'playing' && room.mode !== 'solo'
+      ? (room.chatMessages || []).map((message) => ({ ...message }))
+      : [],
     recentSubmissions: (room.recentSubmissions || []).map(serializeRecentSubmission),
     lastDrawTileId: room.lastDraw?.playerId === viewerId ? room.lastDraw.tileId : null,
   };
@@ -269,6 +272,7 @@ function gameResult(room, reason, winnerIds) {
 function finishGame(room, reason, winnerIds) {
   clearTurnTimer(room);
   room.phase = 'finished';
+  room.chatMessages = [];
   room.deadlineAt = null;
   const result = gameResult(room, reason, winnerIds);
   if (room.forfeitResult) {
@@ -348,6 +352,7 @@ function startGame(room) {
   room.departures = [];
   room.pendingDepartures = {};
   room.recentSubmissions = [];
+  room.chatMessages = [];
   room.lastDraw = null;
   room.emptyPoolPasses = 0;
   for (const player of room.players) {
@@ -806,6 +811,7 @@ function createRoom(payload) {
     pendingDepartures: {},
     log: [],
     recentSubmissions: [],
+    chatMessages: [],
     lastDraw: null,
   };
   if (solo) {
@@ -877,6 +883,7 @@ function leaveRoom(room, clientId, payload = {}) {
     if (!remainingHumans.length) {
       clearTurnTimer(room);
       room.pendingDepartures = {};
+      room.chatMessages = [];
       rooms.delete(room.code);
       return { left: true, deleted: true, forfeitResult: room.forfeitResult || null };
     }
@@ -908,6 +915,7 @@ function leaveRoom(room, clientId, payload = {}) {
   if (room.hostId === clientId) {
     clearTurnTimer(room);
     room.pendingDepartures = {};
+    room.chatMessages = [];
     rooms.delete(room.code);
     return { left: true, deleted: true, forfeitResult: room.forfeitResult || null };
   }
@@ -929,10 +937,51 @@ function updateSettings(room, clientId, payload) {
   broadcast(room);
 }
 
+function sendChatMessage(room, player, payload) {
+  if (player.isBot || room.mode === 'solo' || room.phase !== 'playing') {
+    throw new Error('채팅은 대전 중인 참가자만 사용할 수 있습니다.');
+  }
+  const clientMessageId = payload.clientMessageId;
+  if (typeof clientMessageId !== 'string' || !/^[a-zA-Z0-9_-]{8,80}$/.test(clientMessageId)) {
+    throw new Error('채팅 전송 식별자가 올바르지 않습니다.');
+  }
+  const messages = room.chatMessages || [];
+  // Retrying a request after a lost response must not add another message or
+  // trip the short send interval. IDs are scoped to the authenticated sender.
+  const existing = messages.find((message) => message.playerId === player.id && message.clientMessageId === clientMessageId);
+  if (existing) return existing;
+  if (typeof payload.text !== 'string') throw new Error('채팅 내용을 입력해 주세요.');
+  const text = payload.text.replace(/\r\n?/g, '\n').replace(/\t/g, ' ').trim();
+  if (!text || Array.from(text).length > 300) throw new Error('채팅은 1자 이상 300자 이하로 입력해 주세요.');
+  if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(text)) {
+    throw new Error('채팅에 사용할 수 없는 문자가 포함되어 있습니다.');
+  }
+  const now = Date.now();
+  const previous = [...messages].reverse().find((message) => message.playerId === player.id);
+  if (previous && now - previous.sentAt < 750) {
+    const error = new Error('메시지를 너무 빠르게 보내고 있습니다. 잠시 후 다시 보내 주세요.');
+    error.statusCode = 429;
+    throw error;
+  }
+  const message = {
+    id: randomId('chat-'),
+    playerId: player.id,
+    playerName: player.name,
+    text,
+    sentAt: now,
+    clientMessageId,
+  };
+  room.chatMessages = [...messages, message].slice(-100);
+  broadcast(room);
+  return message;
+}
+
 function action(room, clientId, payload) {
   const player = getPlayer(room, clientId);
   if (!player) throw new Error('이 방의 플레이어가 아닙니다.');
   switch (payload.action) {
+    case 'chat':
+      return sendChatMessage(room, player, payload);
     case 'start':
       if (room.phase !== 'lobby') throw new Error('이미 시작한 게임입니다.');
       if (room.hostId !== clientId) throw new Error('방장만 게임을 시작할 수 있습니다.');
