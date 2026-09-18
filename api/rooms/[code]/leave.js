@@ -9,8 +9,8 @@ module.exports = async function leaveHandler(request, response) {
       return;
     }
     const session = requireSession(request);
-    await readJson(request);
-    sendJson(response, 200, await roomService.leaveRoom(session, request.query?.code));
+    const { body } = await readJson(request);
+    sendJson(response, 200, await roomService.leaveRoom(session, request.query?.code, body));
   } catch (error) {
     sendError(response, error);
   }

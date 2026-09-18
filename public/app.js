@@ -6,6 +6,8 @@ const CLIENT_KEY = 'office-rummikub-client';
 const THEME_KEY = 'office-rummikub-theme';
 const RACK_ORDER_PREFIX = 'office-rummikub-rack-order';
 const SOLO_SESSION_KEY = 'office-rummikub-solo-session';
+// Migrate old persistent solo sessions to tab-scoped storage.
+localStorage.removeItem(SOLO_SESSION_KEY);
 const colors = ['red', 'blue', 'orange', 'black'];
 const RACK_HOLD_DELAY = 360;
 const RACK_HOLD_STEP = 220;
@@ -85,13 +87,18 @@ function applyTheme(nextTheme, shouldRender = true) {
 }
 
 async function api(path, options = {}) {
+  const viewEpoch = globalThis.gameViewEpoch || 0;
+  const turnEpoch = globalThis.turnRequestEpoch || 0;
   const response = await fetch(path, {
     credentials: 'same-origin',
     ...options,
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || '요청을 처리하지 못했습니다.');
+  if (viewEpoch !== (globalThis.gameViewEpoch || 0) || turnEpoch !== (globalThis.turnRequestEpoch || 0)) {
+    const error = new Error('이전 화면의 응답입니다.'); error.stale = true; throw error;
+  }
+  if (!response.ok) { const error = new Error(data.error || '요청을 처리하지 못했습니다.'); error.status = response.status; throw error; }
   return data;
 }
 
@@ -101,7 +108,7 @@ function isStatelessSolo() {
 
 function forgetSoloSession() {
   soloSessionToken = '';
-  localStorage.removeItem(SOLO_SESSION_KEY);
+  sessionStorage.removeItem(SOLO_SESSION_KEY);
 }
 
 async function soloApi(action, payload = {}) {
@@ -111,7 +118,7 @@ async function soloApi(action, payload = {}) {
   });
   if (!response?.token || !response?.state) throw new Error('개인 분석 세션 응답이 올바르지 않습니다.');
   soloSessionToken = response.token;
-  localStorage.setItem(SOLO_SESSION_KEY, soloSessionToken);
+  sessionStorage.setItem(SOLO_SESSION_KEY, soloSessionToken);
   return response.state;
 }
 
@@ -589,6 +596,7 @@ function syncDraftStatus() {
       });
       receiveState(response);
     } catch (error) {
+    if (error.stale) return;
       showToast(error.message, 'error');
     }
   }, 120);
@@ -628,7 +636,7 @@ function stopRoomStateRefresh() {
 }
 
 async function refreshRoomState() {
-  if (!activeRoomCode || roomStateRequestInFlight) return;
+  if (!activeRoomCode || roomStateRequestInFlight || globalThis.turnActionInFlight) return;
   roomStateRequestInFlight = true;
   try {
     const snapshot = isStatelessSolo()
@@ -637,7 +645,9 @@ async function refreshRoomState() {
     connection = 'online';
     if (stateDigest(snapshot) !== latestStateDigest) receiveState(snapshot);
     else renderConnectionOnly();
-  } catch {
+  } catch (error) {
+    if (error.stale) return;
+    if (error.status === 404 || error.status === 410) { goHome(false); showToast('방장이 나가 방이 종료되었습니다.'); return; }
     connection = 'reconnecting';
     renderConnectionOnly();
   } finally {
@@ -687,7 +697,7 @@ function activateSolo(snapshot) {
 function leaveLobbySilently(code) {
   if (!code) return;
   void api(`/api/rooms/${code}/leave`, {
-    method: 'POST',
+    method: 'POST', keepalive: true,
     body: JSON.stringify({ clientId }),
   }).then(() => {
     if (isHomeView()) void refreshPublicRooms();
@@ -696,9 +706,11 @@ function leaveLobbySilently(code) {
   });
 }
 
-function goHome() {
+function goHome(notifyRoom = true) {
+  globalThis.gameViewEpoch = (globalThis.gameViewEpoch || 0) + 1;
+  clearTimeout(draftSyncTimer);
   const codeToLeave = activeRoomCode;
-  const shouldReleaseLobbySeat = Boolean(state?.you && state?.room?.phase === 'lobby');
+  const shouldReleaseLobbySeat = Boolean(notifyRoom && state?.you && !isStatelessSolo());
   clearBatchSelection();
   eventSource?.close();
   eventSource = null;
@@ -784,38 +796,38 @@ function classicHomePage(code) {
       <section class="hero-copy">
         <p class="eyebrow">DATA COMBINATION ANALYSIS</p>
         <h1 class="home-file-title">${escapeHtml(GAME_TITLE)}</h1>
-        <p class="hero-text">개인 분석을 바로 열거나, 공유 분석 세션을 만들어 구성원과 같은 결과를 검토할 수 있습니다.</p>
+        <p class="hero-text">AI와 혼자 플레이하거나, 방을 만들어 친구들과 함께 플레이하세요.</p>
         <div class="feature-row">
-          <span>개인 분석</span><span>공유 세션</span><span>자동 동기화</span>
+          <span>AI 게임</span><span>친구와 대전</span><span>자동 동기화</span>
         </div>
       </section>
       <section class="entry-grid">
         <form id="soloGameForm" class="entry-card solo-card">
-          <div class="card-heading"><span class="step">01</span><div><p class="eyebrow">PRIVATE ANALYSIS</p><h2>개인 분석 열기</h2></div></div>
-          <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" value="나" /></label>
-          <label>분석 주기<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
-          <button class="primary-button" type="submit">개인 분석 시작 <span>→</span></button>
-          <p class="field-note">개인 작업 영역이 바로 열립니다. 자동 분석도 같은 기준으로 동작합니다.</p>
+          <div class="card-heading"><span class="step">01</span><div><p class="eyebrow">AI SOLO</p><h2>AI와 혼자 하기</h2></div></div>
+          <label>내 이름<input required maxlength="24" name="playerName" autocomplete="nickname" value="나" /></label>
+          <label>턴 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
+          <button class="primary-button" type="submit">AI 게임 시작 <span>→</span></button>
+          <p class="field-note">AI도 같은 게임 규칙으로 플레이합니다.</p>
         </form>
         <form id="createRoomForm" class="entry-card create-card">
-          <div class="card-heading"><span class="step">02</span><div><p class="eyebrow">SHARED ANALYSIS</p><h2>공유 분석 만들기</h2></div></div>
-          <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 민지" /></label>
-          <label>세션 이름<input required maxlength="36" name="name" value="정기 조합 검토" /></label>
+          <div class="card-heading"><span class="step">02</span><div><p class="eyebrow">MULTIPLAYER</p><h2>방 만들기</h2></div></div>
+          <label>내 이름<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 민지" /></label>
+          <label>방 이름<input required maxlength="36" name="name" value="함께하는 루미큐브" /></label>
           <div class="form-two">
-            <label>검토 인원<select name="maxPlayers"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></label>
-            <label>검토 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
+            <label>최대 인원<select name="maxPlayers"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></label>
+            <label>턴 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
           </div>
           <div class="visibility-options" role="group" aria-label="공유 범위">
             <span class="visibility-options-label">공유 범위</span>
             <label><input type="radio" name="visibility" value="invite" checked />초대 전용</label>
-            <label><input type="radio" name="visibility" value="public" />공개 대기</label>
+            <label><input type="radio" name="visibility" value="public" />공개방</label>
           </div>
-          <button class="primary-button" type="submit">공유 세션 생성 <span>→</span></button>
-          <p class="field-note">세션을 만들면 검토 코드가 생성됩니다.</p>
+          <button class="primary-button" type="submit">방 만들기 <span>→</span></button>
+          <p class="field-note">세션을 만들면 초대 코드가 생성됩니다.</p>
         </form>
         <form id="joinRoomForm" class="entry-card join-card">
-          <div class="card-heading"><span class="step">03</span><div><p class="eyebrow">OPEN WORKSPACE</p><h2>공유 분석 열기</h2></div></div>
-          <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 준" /></label>
+          <div class="card-heading"><span class="step">03</span><div><p class="eyebrow">JOIN ROOM</p><h2>친구와 대전 열기</h2></div></div>
+          <label>내 이름<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 준" /></label>
           <label>세션 코드<input required maxlength="6" pattern="[A-Za-z0-9]{6}" name="code" value="${escapeHtml(code)}" placeholder="ABC123" class="code-input" /></label>
           <button class="secondary-button" type="submit">세션 불러오기 <span>→</span></button>
           <p class="field-note">공유 받은 6자리 세션 코드를 입력하세요.</p>
@@ -848,24 +860,24 @@ function spreadsheetHomePage(code) {
           </section>
           <section class="sheet-home-cards">
             <form id="soloGameForm" class="sheet-home-card sheet-home-auto-card">
-              <div class="sheet-home-card-title"><span>01</span><div><p>PRIVATE ANALYSIS</p><h2>개인 분석</h2></div></div>
-              <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" value="나" /></label>
-              <label>분석 주기<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
-              <button class="sheet-home-action" type="submit">분석 시작</button>
-              <p>개인 작업 영역을 바로 엽니다.</p>
+              <div class="sheet-home-card-title"><span>01</span><div><p>AI SOLO</p><h2>AI 게임</h2></div></div>
+              <label>내 이름<input required maxlength="24" name="playerName" autocomplete="nickname" value="나" /></label>
+              <label>턴 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label>
+              <button class="sheet-home-action" type="submit">게임 시작</button>
+              <p>AI와 바로 게임을 시작합니다.</p>
             </form>
             <form id="createRoomForm" class="sheet-home-card">
-              <div class="sheet-home-card-title"><span>02</span><div><p>SHARED ANALYSIS</p><h2>공유 분석</h2></div></div>
-              <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 민지" /></label>
-              <label>세션 이름<input required maxlength="36" name="name" value="정기 조합 검토" /></label>
-              <div class="sheet-home-form-two"><label>검토 인원<select name="maxPlayers"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></label><label>검토 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label></div>
-              <div class="visibility-options sheet-home-visibility" role="group" aria-label="공유 범위"><span class="visibility-options-label">공유 범위</span><label><input type="radio" name="visibility" value="invite" checked />초대 전용</label><label><input type="radio" name="visibility" value="public" />공개 대기</label></div>
-              <button class="sheet-home-action" type="submit">공유 세션 생성</button>
-              <p>검토용 세션 코드가 생성됩니다.</p>
+              <div class="sheet-home-card-title"><span>02</span><div><p>MULTIPLAYER</p><h2>친구와 대전</h2></div></div>
+              <label>내 이름<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 민지" /></label>
+              <label>방 이름<input required maxlength="36" name="name" value="함께하는 루미큐브" /></label>
+              <div class="sheet-home-form-two"><label>최대 인원<select name="maxPlayers"><option value="2">2명</option><option value="3">3명</option><option value="4" selected>4명</option></select></label><label>턴 시간<select name="turnSeconds"><option value="30">30초</option><option value="60" selected>60초</option><option value="90">90초</option><option value="120">120초</option><option value="150">150초</option><option value="180">180초</option></select></label></div>
+              <div class="visibility-options sheet-home-visibility" role="group" aria-label="공유 범위"><span class="visibility-options-label">공유 범위</span><label><input type="radio" name="visibility" value="invite" checked />초대 전용</label><label><input type="radio" name="visibility" value="public" />공개방</label></div>
+              <button class="sheet-home-action" type="submit">방 만들기</button>
+              <p>친구에게 전달할 초대 코드가 생성됩니다.</p>
             </form>
             <form id="joinRoomForm" class="sheet-home-card">
-              <div class="sheet-home-card-title"><span>03</span><div><p>OPEN WORKSPACE</p><h2>기존 분석</h2></div></div>
-              <label>분석자<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 준" /></label>
+              <div class="sheet-home-card-title"><span>03</span><div><p>JOIN ROOM</p><h2>초대 코드로 참여</h2></div></div>
+              <label>내 이름<input required maxlength="24" name="playerName" autocomplete="nickname" placeholder="예: 준" /></label>
               <label>세션 코드<input required maxlength="6" pattern="[A-Za-z0-9]{6}" name="code" value="${escapeHtml(code)}" placeholder="ABC123" class="code-input" /></label>
               <button class="sheet-home-action secondary" type="submit">세션 불러오기</button>
               <p>공유 받은 6자리 코드를 입력하세요.</p>
@@ -1117,7 +1129,7 @@ function resultOverlay() {
       <section class="result-card">
         <p class="eyebrow">GAME COMPLETE</p>
         <h2>${winnerNames ? `${escapeHtml(winnerNames)} ${result.winnerIds.length > 1 ? '공동 승리' : '승리'}` : '게임 종료'}</h2>
-        <p>${result.reason === 'empty-rack' ? '손패를 모두 내려 먼저 승리했습니다.' : '풀이 소진되어 가장 낮은 손패 합계로 종료했습니다.'}</p>
+        <p>${result.reason === 'player-left' ? '참가자가 나가 게임이 종료되었습니다.' : result.reason === 'empty-rack' ? '손패를 모두 내려 먼저 승리했습니다.' : '풀이 소진되어 가장 낮은 손패 합계로 종료했습니다.'}</p>
         <div class="score-table">${result.scores.map((score) => `<div class="${result.winnerIds.includes(score.id) ? 'winner' : ''}"><span>${escapeHtml(score.name)}</span><small>손패 ${score.tilesLeft}장 · ${score.tileTotal}점</small><strong>${score.score > 0 ? '+' : ''}${score.score}</strong></div>`).join('')}</div>
         ${state.room.mode === 'solo' ? '<button class="primary-button" data-action="play-solo-again">AI와 다시 하기 <span>↻</span></button>' : ''}
         <button class="${state.room.mode === 'solo' ? 'secondary-button' : 'primary-button'}" data-action="home">첫 화면으로 <span>→</span></button>
@@ -1446,6 +1458,8 @@ function undoDraft() {
 async function submitTurn() {
   if (globalThis.turnActionInFlight || !draft || !isDraftDirty()) return;
   globalThis.turnActionInFlight = true;
+  globalThis.turnRequestEpoch = (globalThis.turnRequestEpoch || 0) + 1;
+  if (typeof draftSyncTimer !== 'undefined') clearTimeout(draftSyncTimer);
   sortDraftMelds();
   const attemptedDraft = cloneDraftModel(draft);
   const attemptedBaseline = baselineSignature;
@@ -1462,6 +1476,7 @@ async function submitTurn() {
       : await api(`/api/rooms/${activeRoomCode}/action`, { method: 'POST', body: JSON.stringify(action) });
     receiveState(response);
   } catch (error) {
+    if (error.stale) return;
     if (state?.turn?.isYourTurn && state.turn.deadlineAt === attemptedTurnKey) {
       draft = attemptedDraft;
       baselineSignature = attemptedBaseline;
@@ -1479,6 +1494,8 @@ async function submitTurn() {
 async function drawTile() {
   if (globalThis.turnActionInFlight || !state?.turn?.isYourTurn) return;
   globalThis.turnActionInFlight = true;
+  globalThis.turnRequestEpoch = (globalThis.turnRequestEpoch || 0) + 1;
+  if (typeof draftSyncTimer !== 'undefined') clearTimeout(draftSyncTimer);
   try {
     const action = { clientId, action: 'draw' };
     const response = isStatelessSolo()
@@ -1486,6 +1503,7 @@ async function drawTile() {
       : await api(`/api/rooms/${activeRoomCode}/action`, { method: 'POST', body: JSON.stringify(action) });
     receiveState(response);
   } catch (error) {
+    if (error.stale) return;
     showToast(error.message, 'error');
   } finally {
     globalThis.turnActionInFlight = false;
@@ -1501,6 +1519,7 @@ async function startSoloGame(form = null, replay = null) {
     const snapshot = await soloApi('create', { playerName, turnSeconds });
     activateSolo(snapshot);
   } catch (error) {
+    if (error.stale) return;
     // The dependency-free API is available on Vercel. Keep the bundled local
     // server convenient for offline development until it exposes this route.
     if (!/찾을 수 없는 요청/.test(error.message)) {
@@ -1535,6 +1554,7 @@ async function createRoom(form) {
     });
     activateRoom(response.roomCode, response.state);
   } catch (error) {
+    if (error.stale) return;
     showToast(error.message, 'error');
   }
 }
@@ -1553,6 +1573,7 @@ async function joinRoom(form) {
     });
     activateRoom(code, response.state);
   } catch (error) {
+    if (error.stale) return;
     showToast(error.message, 'error');
   }
 }
@@ -1580,6 +1601,7 @@ async function joinPublicRoom(button) {
     });
     activateRoom(code, response.state);
   } catch (error) {
+    if (error.stale) return;
     showToast(error.message, 'error');
     void refreshPublicRooms();
     if (isHomeView() && button.isConnected) {
@@ -1598,6 +1620,7 @@ async function saveSettings(form) {
     receiveState(response);
     showToast('방 설정을 저장했습니다.');
   } catch (error) {
+    if (error.stale) return;
     showToast(error.message, 'error');
   }
 }
@@ -1610,6 +1633,7 @@ async function startGame() {
     });
     receiveState(response);
   } catch (error) {
+    if (error.stale) return;
     showToast(error.message, 'error');
   }
 }
@@ -1880,7 +1904,7 @@ async function ensureGuestSession() {
 async function init() {
   applyTheme(theme(), false);
   await ensureGuestSession();
-  const savedSolo = pendingRoomCode ? '' : localStorage.getItem(SOLO_SESSION_KEY);
+  const savedSolo = pendingRoomCode ? '' : sessionStorage.getItem(SOLO_SESSION_KEY);
   if (savedSolo) {
     soloSessionToken = savedSolo;
     try {
@@ -1912,3 +1936,15 @@ async function init() {
 
 init();
 
+
+// Page unload can also mean reload: allow a short reconnection grace period.
+window.addEventListener('pagehide', () => {
+  globalThis.gameViewEpoch = (globalThis.gameViewEpoch || 0) + 1;
+  if (!activeRoomCode || isStatelessSolo()) return;
+  const url = `/api/rooms/${activeRoomCode}/leave`;
+  const body = JSON.stringify({ clientId, disconnect: true });
+  if (!navigator.sendBeacon?.(url, new Blob([body], { type: 'application/json' }))) {
+    void fetch(url, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body, keepalive: true }).catch(() => {});
+  }
+});
+window.addEventListener('pageshow', (event) => { if (event.persisted) void refreshRoomState(); });

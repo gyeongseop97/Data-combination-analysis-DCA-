@@ -124,6 +124,36 @@ async function run() {
   assert.equal(afterTimeout.activeIndex, 1);
   assert.ok(Number(afterTimeout.deadlineAt) > Date.now() - 1000);
 
+  // Explicit owner exit deletes only that room, never another member's room.
+  assert.equal((await service.leaveRoom(observer, created.roomCode)).left, false);
+  assert.ok(await store.getRoom(created.roomCode));
+  await service.leaveRoom(host, created.roomCode);
+  assert.equal(await store.getRoom(created.roomCode), null);
+  assert.equal((await service.scheduledAction({roomCode:created.roomCode,kind:'turn'})).accepted,false);
+  const closeRoom = await service.createRoom(host, {playerName:'Host',visibility:'public',maxPlayers:4,turnSeconds:30});
+  await service.joinRoom(guest,closeRoom.roomCode,{playerName:'Guest'});
+  await service.leaveRoom(host,closeRoom.roomCode,{disconnect:true});
+  let pending=await store.getRoom(closeRoom.roomCode);
+  assert.ok(pending.pendingDepartures[host.id]);
+  await service.roomState(host,closeRoom.roomCode);
+  pending=await store.getRoom(closeRoom.roomCode);
+  assert.equal(pending.pendingDepartures[host.id],undefined,'reload must cancel closure');
+  await service.leaveRoom(host,closeRoom.roomCode,{disconnect:true});
+  pending=await store.getRoom(closeRoom.roomCode);
+  pending.pendingDepartures[host.id]=Date.now()-1;
+  await store.saveRoom(pending,pending.revision);
+  await service.scheduledAction({roomCode:closeRoom.roomCode,kind:'departure'});
+  assert.equal(await store.getRoom(closeRoom.roomCode),null);
+  assert.equal((await service.listPublicRooms(guest,20)).rooms.some(r=>r.code===closeRoom.roomCode),false);
+  const playing=await service.createRoom(host,{playerName:'Host',turnSeconds:30});
+  await service.joinRoom(guest,playing.roomCode,{playerName:'Guest'});
+  await service.roomAction(host,playing.roomCode,{action:'start'});
+  await service.leaveRoom(guest,playing.roomCode);
+  const ended=await service.roomState(host,playing.roomCode);
+  assert.equal(ended.room.phase,'finished');assert.equal(ended.result.reason,'player-left');
+  assert.ok(await store.getRoom(playing.roomCode),'guest exit must not delete host room');
+  await service.leaveRoom(host,playing.roomCode);
+  console.log('explicit leave, delayed window close, reconnect and cancelled tasks: passed');
   console.log('Redis-backed room service smoke test: passed');
 }
 

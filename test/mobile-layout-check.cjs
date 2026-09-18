@@ -7,7 +7,7 @@ process.chdir(process.env.TEMP);
  const browser=await chromium.launch({headless:true,channel:process.env.DCA_BROWSER_CHANNEL || "chrome"});
  const page=await browser.newPage();
  page.on('pageerror',e=>console.log('PAGE ERROR',e.message));
- const source=fs.readFileSync(root+'public/app.js','utf8').replace(/init\(\);\s*$/, `globalThis.seed = (themeName,count,rackCount) => {
+ const source=fs.readFileSync(root+'public/app.js','utf8').replace(/\ninit\(\);/, `globalThis.seed = (themeName,count,rackCount) => {
  localStorage.setItem(THEME_KEY,themeName);
  const tile=(id)=>({id:String(id),kind:'number',color:colors[id%4],value:id%13+1});
  state={room:{code:'TEST',phase:'playing',mode:'solo',turnSeconds:60,players:Array.from({length:4},(_,i)=>({id:String(i),name:'Player '+i,isYou:i===0,isActive:i===0,tileCount:14,hasOpened:true}))},you:{id:'0',name:'Me',rack:Array.from({length:rackCount},(_,i)=>tile(200+i)),hasOpened:true},board:Array.from({length:count},(_,i)=>({id:'g'+i,type:'run',tiles:Array.from({length:3},(_,j)=>tile(i*3+j))})),turn:{isYourTurn:true,activePlayerId:'0',deadlineAt:Date.now()+60000},poolCount:50,log:[]};

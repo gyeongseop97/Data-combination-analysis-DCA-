@@ -263,7 +263,7 @@ function finishGame(room, reason, winnerIds) {
       score: player.id === singleWinner ? winnerScore : singleWinner ? -totals[player.id] : 0,
     })),
   };
-  log(room, reason === 'empty-rack' ? '누군가 손패를 모두 내려 게임이 끝났습니다.' : '풀의 타일이 소진되어 교착 상태로 게임이 끝났습니다.');
+  log(room, reason === 'player-left' ? '참가자가 나가 게임이 종료되었습니다.' : reason === 'empty-rack' ? '누군가 손패를 모두 내려 게임이 끝났습니다.' : '풀의 타일이 소진되어 교착 상태로 게임이 끝났습니다.');
   broadcast(room);
 }
 
@@ -725,7 +725,7 @@ function commitMove(room, clientId, payload) {
 
 function requireRoom(code) {
   const room = rooms.get(String(code || '').toUpperCase());
-  if (!room) throw new Error('해당 방을 찾을 수 없습니다. 초대 코드를 확인해 주세요.');
+  if (!room) { const error = new Error('방이 종료되었거나 존재하지 않습니다.'); error.statusCode = 404; throw error; }
   return room;
 }
 
@@ -814,21 +814,36 @@ function joinRoom(room, payload) {
   return player;
 }
 
-function leaveRoom(room, clientId) {
-  if (room.phase !== 'lobby') return { left: false, reason: 'already-started' };
+function leaveRoom(room, clientId, payload = {}) {
   const index = room.players.findIndex((player) => player.id === clientId);
   if (index < 0) return { left: false, reason: 'not-member' };
-  room.players.splice(index, 1);
-  if (!room.players.length) {
+  if (payload.disconnect === true) {
+    const dueAt = Date.now() + 8000;
+    room.pendingDepartures ||= {};
+    room.pendingDepartures[clientId] = dueAt;
+    if (!isDurableRuntime()) {
+      const timer = setTimeout(() => {
+        if (rooms.get(room.code) === room && room.pendingDepartures?.[clientId] === dueAt) leaveRoom(room, clientId);
+      }, 8100);
+      timer.unref?.();
+    }
+    return { left: false, disconnecting: true, dueAt };
+  }
+  delete room.pendingDepartures?.[clientId];
+  if (room.hostId === clientId) {
+    clearTurnTimer(room);
     rooms.delete(room.code);
     return { left: true, deleted: true };
   }
-  if (room.hostId === clientId) room.hostId = room.players[0].id;
+  if (room.phase === 'playing') {
+    finishGame(room, 'player-left', []);
+    return { left: true, deleted: false };
+  }
+  room.players.splice(index, 1);
   log(room, '참가자가 대기실을 나갔습니다.');
   broadcast(room);
   return { left: true, deleted: false };
 }
-
 function updateSettings(room, clientId, payload) {
   if (room.mode === 'solo') throw new Error('AI 연습전은 만들 때 바로 시작됩니다.');
   if (room.phase !== 'lobby') throw new Error('게임 시작 전 대기실에서만 설정을 바꿀 수 있습니다.');
@@ -957,6 +972,7 @@ const server = http.createServer(async (request, response) => {
       const clientId = endpoint === 'events' ? cleanClientId(url.searchParams.get('clientId')) : null;
       if (request.method === 'GET' && !endpoint) {
         const viewerId = cleanClientId(url.searchParams.get('clientId'));
+        if (room.pendingDepartures?.[viewerId] > Date.now()) delete room.pendingDepartures[viewerId];
         sendJson(response, 200, roomView(room, viewerId));
         return;
       }
@@ -973,7 +989,7 @@ const server = http.createServer(async (request, response) => {
       if (request.method === 'POST' && endpoint === 'leave') {
         const payload = await readJson(request);
         const id = cleanClientId(payload.clientId);
-        sendJson(response, 200, leaveRoom(room, id));
+        sendJson(response, 200, leaveRoom(room, id, payload));
         return;
       }
       if (request.method === 'POST' && endpoint === 'settings') {
@@ -997,7 +1013,7 @@ const server = http.createServer(async (request, response) => {
     }
     sendJson(response, 404, { error: '찾을 수 없는 요청입니다.' });
   } catch (error) {
-    sendJson(response, 400, { error: error.message || '요청을 처리하지 못했습니다.' });
+    sendJson(response, error.statusCode || 400, { error: error.message || '요청을 처리하지 못했습니다.' });
   }
 });
 
