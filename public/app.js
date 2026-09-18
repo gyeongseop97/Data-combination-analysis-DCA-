@@ -48,6 +48,7 @@ let touchDrag = null;
 let lastDragAt = 0;
 let pendingInteractiveRender = false;
 let batchSelection = null;
+const rackOrderCache = new Map();
 let tileHold = null;
 let tileHoldDelayTimer = null;
 let tileHoldStepTimer = null;
@@ -332,8 +333,10 @@ function rackOrderKey(snapshot = state) {
 function rememberRackOrder(rack, snapshot = state) {
   const key = rackOrderKey(snapshot);
   if (!key) return;
+  const order = rack.map((tile) => tile.id);
+  rackOrderCache.set(key, order);
   try {
-    localStorage.setItem(key, JSON.stringify(rack.map((tile) => tile.id)));
+    localStorage.setItem(key, JSON.stringify(order));
   } catch {
     // The game remains playable if a privacy mode blocks local storage writes.
   }
@@ -343,7 +346,7 @@ function applyRememberedRackOrder(rack, snapshot = state) {
   const key = rackOrderKey(snapshot);
   if (!key) return rack;
   try {
-    const saved = JSON.parse(localStorage.getItem(key) || '[]');
+    const saved = rackOrderCache.get(key) || JSON.parse(localStorage.getItem(key) || '[]');
     if (!Array.isArray(saved)) return rack;
     const byId = new Map(rack.map((tile) => [tile.id, tile]));
     const arranged = saved.map((id) => byId.get(id)).filter(Boolean);
@@ -354,6 +357,28 @@ function applyRememberedRackOrder(rack, snapshot = state) {
   }
 }
 
+function canArrangeRack() {
+  return Boolean(state?.you && state?.room?.phase === 'playing');
+}
+
+function currentRack() {
+  if (state?.turn?.isYourTurn && draft) return draft.rack;
+  return applyRememberedRackOrder(state?.you?.rack || []);
+}
+
+function canDragTile(tile) {
+  if (!tile || globalThis.turnActionInFlight) return false;
+  if (tile.dataset.source === 'rack') return canArrangeRack();
+  return Boolean(draft && state?.turn?.isYourTurn && state?.room?.phase === 'playing');
+}
+
+function findDraggableTile(source, groupId, tileId) {
+  if (state?.turn?.isYourTurn && draft) return findDraftTile(source, groupId, tileId);
+  if (source !== 'rack' || !canArrangeRack()) return null;
+  const rack = currentRack();
+  const index = rack.findIndex((tile) => tile.id === tileId);
+  return index < 0 ? null : { tile: rack[index], list: rack, index };
+}
 function batchMatches(source, groupId, tileId) {
   return Boolean(
     batchSelection
@@ -497,7 +522,7 @@ function compatibleTileIds(tiles, tileId) {
 }
 
 function rackConsecutiveTileIds(tileId) {
-  return draft ? compatibleTileIds(draft.rack, tileId) : [];
+  return compatibleTileIds(currentRack(), tileId);
 }
 
 function groupTailTileIds(groupId, tileId) {
@@ -724,13 +749,26 @@ function receiveState(nextState) {
     && nextState?.turn?.isYourTurn
     && nextState.turn.deadlineAt === draftTurnKey,
   );
+  const keepRackInteraction = Boolean(
+    state?.room?.code === nextState?.room?.code
+    && nextState?.room?.phase === 'playing'
+    && !state?.turn?.isYourTurn && !nextState?.turn?.isYourTurn
+    && (tileHold?.source === 'rack' || draggedTile?.source === 'rack')
+    && state?.you?.rack?.length === nextState?.you?.rack?.length
+    && state?.you?.rack?.every((tile) => nextState.you.rack.some((next) => next.id === tile.id)),
+  );
   const previousPhase = state?.room?.phase;
   state = nextState;
   if (activeRoomCode && previousPhase && previousPhase !== nextState?.room?.phase) syncScreenUrl(nextState);
   if (Number.isFinite(Number(nextState?.serverNow))) serverClockOffsetMs = Date.now() - Number(nextState.serverNow);
   latestStateDigest = stateDigest(nextState);
-  if (!keepDraft) hydrateDraft(nextState);
-  if (keepDraft && (tileHold || touchDrag)) {
+  if (!keepDraft && !keepRackInteraction) {
+    draggedTile = null;
+    touchDrag = null;
+    clearDragFeedback();
+    hydrateDraft(nextState);
+  }
+  if ((keepDraft || keepRackInteraction) && (tileHold || touchDrag || draggedTile)) {
     pendingInteractiveRender = true;
     return;
   }
@@ -1200,10 +1238,11 @@ function gamePage() {
   const turn = state.turn;
   const isYourTurn = Boolean(turn?.isYourTurn);
   const canEdit = isYourTurn && state.room.phase === 'playing';
+  const canSortRack = canArrangeRack();
   const soloMode = state.room.mode === 'solo';
   const activeOpponent = state.room.players.find((player) => player.id === turn?.activePlayerId);
   const shownGroups = canEdit && draft ? draft.groups : state.board.map((group) => ({ ...group, existing: true }));
-  const shownRack = canEdit && draft ? draft.rack : applyRememberedRackOrder(state.you.rack.map(cloneTile));
+  const shownRack = currentRack();
   const opening = !state.you.hasOpened;
   const dirty = canEdit && isDraftDirty();
   const formulaText = soloMode && activeOpponent?.isBot && !canEdit
@@ -1213,7 +1252,7 @@ function gamePage() {
       : '=TURN_STATUS("읽기 전용")';
   const columnHeaders = Array.from({ length: 26 }, (_, index) => `<span>${String.fromCharCode(65 + index)}</span>`).join('');
   const rowHeaders = Array.from({ length: 38 }, (_, index) => `<span>${index + 1}</span>`).join('');
-  const rackControls = canEdit
+  const rackControls = canSortRack
     ? `<div class="rack-tools" aria-label="손패 정렬"><span>정렬</span><button class="text-button" data-action="sort-rack" data-sort="sequence" title="색상별 1부터 13까지 정렬">숫자순</button><button class="text-button" data-action="sort-rack" data-sort="group" title="같은 숫자의 색상을 모아 정렬">같은 숫자 모으기</button></div>`
     : '';
   const boardContent = shownGroups.length
@@ -1247,8 +1286,8 @@ function gamePage() {
           </section>
 
           <section class="rack-card ${canEdit ? 'editing' : ''}">
-            <div class="rack-heading"><div><p class="eyebrow">MY RACK</p><h2>${canEdit ? '내 손패와 임시 대기열' : '내 손패'}</h2></div><div class="rack-heading-actions"><div class="rack-hint">${canEdit ? '손패·보드에서 이어진 수 또는 같은 숫자를 길게 눌러 묶기' : soloMode && activeOpponent?.isBot ? 'AI가 수를 계산 중입니다' : '상대 턴에는 읽기 전용'}</div>${rackControls}</div></div>
-            <div class="rack-tiles ${shownRack.length ? '' : 'empty'}" ${canEdit ? 'data-drop-zone="rack"' : ''}>${shownRack.length ? shownRack.map((tile) => tileHtml(tile, 'rack', '', canEdit)).join('') : '<span>손패가 없습니다.</span>'}</div>${canEdit ? `<p class="rack-batch-status" data-rack-batch-status aria-live="polite" ${batchSelection?.source === 'rack' ? '' : 'hidden'}>${escapeHtml(batchStatusText())}</p>` : ''}
+            <div class="rack-heading"><div><p class="eyebrow">MY RACK</p><h2>${canEdit ? '내 손패와 임시 대기열' : '내 손패'}</h2></div><div class="rack-heading-actions"><div class="rack-hint">${canEdit ? '손패·보드에서 이어진 수 또는 같은 숫자를 길게 눌러 묶기' : canSortRack ? '상대 턴에도 손패를 정렬할 수 있어요' : '게임이 종료되었습니다'}</div>${rackControls}</div></div>
+            <div class="rack-tiles ${shownRack.length ? '' : 'empty'}" ${canSortRack ? 'data-drop-zone="rack"' : ''}>${shownRack.length ? shownRack.map((tile) => tileHtml(tile, 'rack', '', canSortRack)).join('') : '<span>손패가 없습니다.</span>'}</div>${canSortRack ? `<p class="rack-batch-status" data-rack-batch-status aria-live="polite" ${batchSelection?.source === 'rack' ? '' : 'hidden'}>${escapeHtml(batchStatusText())}</p>` : ''}
             <div class="turn-actions">
               <button class="draw-button" data-action="draw-tile" ${canEdit ? '' : 'disabled'}><span>＋</span>${state.poolCount ? '1장 뽑고 턴 끝내기' : '패스하고 턴 끝내기'}</button>
               <button class="submit-button" data-action="submit-turn" ${canEdit && dirty ? '' : 'disabled'}>검증 후 제출 <span>↗</span></button>
@@ -1459,7 +1498,24 @@ function isOriginalBoardTile(tileId) {
   return Boolean(state?.board?.some((group) => group.tiles.some((tile) => tile.id === tileId)));
 }
 
+function reorderWaitingRack(drag, destination) {
+  if (!canArrangeRack() || globalThis.turnActionInFlight
+    || drag?.source !== 'rack' || destination?.type !== 'rack') return false;
+  const rack = currentRack();
+  const ids = dragTileIds(drag);
+  if (!ids.length || ids.includes(destination.targetTileId)) return false;
+  const tiles = ids.map((id) => rack.find((tile) => tile.id === id));
+  if (tiles.some((tile) => !tile)) return false;
+  const reordered = rack.filter((tile) => !ids.includes(tile.id));
+  insertDroppedTiles(reordered, tiles, destination.targetTileId, destination.placeAfter);
+  rememberRackOrder(reordered);
+  selected = null;
+  clearBatchSelection();
+  render();
+  return true;
+}
 function moveDraftTile(drag, destination) {
+  if (!state?.turn?.isYourTurn) return reorderWaitingRack(drag, destination);
   if (!draft || !state?.turn?.isYourTurn || !drag || !destination || globalThis.turnActionInFlight) return false;
   const tileIds = dragTileIds(drag);
   if (!tileIds.length || !['rack', 'group', 'new-group'].includes(destination.type)) return false;
@@ -1523,16 +1579,19 @@ function compareRackTiles(left, right, mode) {
 }
 
 function sortRack(mode) {
-  if (!draft || !state?.turn?.isYourTurn || globalThis.turnActionInFlight) return;
+  if (!canArrangeRack() || globalThis.turnActionInFlight) return;
   clearBatchSelection();
-  const sorted = draft.rack
+  const rack = currentRack();
+  const sorted = rack
     .map((tile, index) => ({ tile, index }))
     .sort((left, right) => compareRackTiles(left.tile, right.tile, mode) || left.index - right.index)
     .map(({ tile }) => tile);
-  if (sorted.some((tile, index) => tile.id !== draft.rack[index].id)) {
-    recordDraftHistory();
-    draft.rack = sorted;
-    rememberRackOrder(draft.rack);
+  if (sorted.some((tile, index) => tile.id !== rack[index].id)) {
+    if (state.turn?.isYourTurn && draft) {
+      recordDraftHistory();
+      draft.rack = sorted;
+    }
+    rememberRackOrder(sorted);
   }
   render();
 }
@@ -1880,13 +1939,13 @@ function markDraggedTiles(tileIds, extraClass = '') {
 }
 
 function beginTouchTileDrag(tile, event, selectedIds = null) {
-  if (event.pointerType === 'mouse' || !tile || !draft || !state?.turn?.isYourTurn || globalThis.turnActionInFlight) return false;
+  if (event.pointerType === 'mouse' || !canDragTile(tile)) return false;
   const sourceName = tile.dataset.source;
   const groupId = tile.dataset.groupId || '';
   const tileId = tile.dataset.tileId;
   const tileIds = (selectedIds?.length ? selectedIds : [tileId])
-    .filter((id) => Boolean(findDraftTile(sourceName, groupId, id)));
-  const source = findDraftTile(sourceName, groupId, tileId);
+    .filter((id) => Boolean(findDraggableTile(sourceName, groupId, id)));
+  const source = findDraggableTile(sourceName, groupId, tileId);
   if (!source || !tileIds.length || (source.group?.existing && !state.you.hasOpened)) return false;
   if (!selectedIds?.length) clearBatchSelection();
   draggedTile = { source: sourceName, groupId, tileId, tileIds: [...tileIds] };
@@ -1933,7 +1992,7 @@ function finishTouchTileDrag(event, cancelled = false) {
 document.addEventListener('pointerdown', (event) => {
   if (event.isPrimary === false || (event.pointerType === 'mouse' && event.button !== 0)) return;
   const tile = event.target.closest('[data-drag-tile]');
-  if (!tile || !draft || !state?.turn?.isYourTurn || globalThis.turnActionInFlight) return;
+  if (!canDragTile(tile)) return;
   const source = tile.dataset.source;
   const groupId = tile.dataset.groupId || '';
   if (event.pointerType !== 'mouse' && tile.setPointerCapture) {
@@ -2011,13 +2070,13 @@ document.addEventListener('dragstart', (event) => {
     return;
   }
   const tile = event.target.closest('[data-drag-tile]');
-  if (!tile || !draft || !state?.turn?.isYourTurn || globalThis.turnActionInFlight) return;
+  if (!canDragTile(tile)) return;
   const sourceName = tile.dataset.source;
   const groupId = tile.dataset.groupId || '';
   const tileId = tile.dataset.tileId;
   const useBatch = batchMatches(sourceName, groupId, tileId);
   const tileIds = (useBatch ? batchSelection.tileIds : [tileId])
-    .filter((id) => Boolean(findDraftTile(sourceName, groupId, id)));
+    .filter((id) => Boolean(findDraggableTile(sourceName, groupId, id)));
   if (!tileIds.length) return;
   if (tileHold) {
     stopTileHold();
@@ -2025,7 +2084,7 @@ document.addEventListener('dragstart', (event) => {
   }
   if (!useBatch) clearBatchSelection();
 
-  const source = findDraftTile(sourceName, groupId, tileId);
+  const source = findDraggableTile(sourceName, groupId, tileId);
   if (!source || (source.group?.existing && !state.you.hasOpened)) return;
   draggedTile = { source: sourceName, groupId, tileId, tileIds: [...tileIds] };
   event.dataTransfer.effectAllowed = 'move';
