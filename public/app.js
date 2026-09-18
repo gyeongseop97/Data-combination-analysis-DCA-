@@ -1014,6 +1014,7 @@ function opponentsHtml() {
         <div class="seat-top"><span class="avatar">${player.isBot ? 'AI' : escapeHtml(player.name.slice(0, 1))}</span><span>${escapeHtml(player.name)}${player.isYou ? ' <small>나</small>' : ''}</span>${player.isBot ? '<i class="ai-chip">AI</i>' : player.host ? '<i>방장</i>' : ''}</div>
         <strong>${player.isYou ? '내 손패' : '남은 타일'} <b>${player.tileCount}</b></strong>
         <span class="seat-state">${status}</span>
+        ${player.id === state.turn?.activePlayerId ? turnClock() : ''}
       </article>`;
   }).join('');
 }
@@ -1044,15 +1045,10 @@ function opponentSubmissionHistoryHtml() {
 }
 function turnClock() {
   const turn = state.turn;
-  if (!turn) return '';
-  const active = state.room.players.find((player) => player.id === turn.activePlayerId);
-  const status = turn.isYourTurn
-    ? '내 턴'
-    : active?.isBot ? `${escapeHtml(turn.activePlayerName)}가 생각 중` : `${escapeHtml(turn.activePlayerName)}의 턴`;
+  if (!turn || state.room.phase !== 'playing') return '';
   const renderedAt = Date.now();
-  return `<div class="turn-status ${turn.isYourTurn ? 'your-turn' : ''} ${active?.isBot ? 'ai-turn' : ''}"><span>${status}</span><strong class="turn-clock" data-deadline="${turn.deadlineAt}" data-server-now="${state.serverNow}" data-rendered-at="${renderedAt}">--:--</strong></div>`;
+  return `<div class="seat-timer" aria-label="현재 플레이어의 턴 남은 시간"><span>남은 시간</span><strong class="turn-clock" data-deadline="${turn.deadlineAt}" data-server-now="${state.serverNow}" data-rendered-at="${renderedAt}">--:--</strong></div>`;
 }
-
 function gamePage() {
   const turn = state.turn;
   const isYourTurn = Boolean(turn?.isYourTurn);
@@ -1088,7 +1084,7 @@ function gamePage() {
           <div class="sheet-menu" aria-hidden="true"><span>파일</span><span>편집</span><span>보기</span><span>게임</span><div></div><small>공유됨 · 자동 저장됨</small></div>
           <section class="game-banner">
             <div class="room-label"><span class="eyebrow">${soloMode ? 'AI PRACTICE' : `ROOM ${state.room.code}`}</span><div class="room-title-row"><h1>${escapeHtml(GAME_TITLE)}</h1><button class="game-home-button" type="button" data-action="home" aria-label="게임을 나가 첫 화면으로" title="첫 화면으로"><span aria-hidden="true">⌂</span><span>홈</span></button><button class="game-theme-button" type="button" data-action="theme" data-theme="${theme() === 'sheet' ? 'classic' : 'sheet'}">${theme() === 'sheet' ? '기본' : '엑셀'}</button></div></div>
-            ${turnClock()}
+
             <div class="pool-badge"><span>풀</span><strong>${state.poolCount}</strong></div>
           </section>
           <section class="seat-grid">${opponentsHtml()}</section>
