@@ -33,6 +33,9 @@ globalThis.boardWrapAudit = {
     };
     soloSessionToken = '';
     turnActionInFlight = false;
+    clearTimeout(draftSyncTimer);
+    clearTimeout(toastTimer);
+    toast.className = 'toast';
     selected = null;
     batchSelection = null;
     lastDragAt = 0;
@@ -40,6 +43,7 @@ globalThis.boardWrapAudit = {
     hydrateDraft();
     render();
   },
+  cancelDraftSync() { clearTimeout(draftSyncTimer); },
   get draft() { return draft; }
 };`;
 const appSource = fs.readFileSync(path.join(root, 'public/app.js'), 'utf8');
@@ -165,6 +169,7 @@ const html = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
         target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: r.left + 1, clientY: r.top + r.height / 2 }));
         target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer, clientX: r.left + 1, clientY: r.top + r.height / 2 }));
         from.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer }));
+        boardWrapAudit.cancelDraftSync();
         return { found: true, moved: boardWrapAudit.draft.groups.find(group => group.id === groupId).tiles.some(tile => tile.id === 'rack-0') };
       });
       check(drop.found && drop.moved, theme + ': lower-row drag insertion failed');
