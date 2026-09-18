@@ -47,6 +47,7 @@ let tileHoldStepTimer = null;
 let suppressTileClickUntil = 0;
 let renderSequence = 0;
 let boardFitTimer = null;
+let boardResizeObserver = null;
 globalThis.turnActionInFlight = false;
 let publicRooms = [];
 let publicRoomsStatus = 'idle';
@@ -1123,6 +1124,8 @@ function syncWorksheetHeaderOffsets() {
 function fitBoardDensity() {
   const board = document.querySelector('.board-grid');
   if (!board) return;
+  if (board.clientWidth === 0 || board.clientHeight === 0) return;
+  board.style.setProperty('--board-scale', '1');
   const densities = ['normal', 'compact', 'tight', 'ultra', 'micro', 'nano'];
   const tileCount = board.querySelectorAll('.meld .tile').length;
   const meldCount = board.querySelectorAll('.meld').length;
@@ -1135,13 +1138,20 @@ function fitBoardDensity() {
   let density = densities[densities.length - 1];
   for (const candidate of densities.slice(preferredIndex)) {
     board.dataset.boardDensity = candidate;
-    if (board.scrollHeight <= board.clientHeight + 1) {
+    if (board.scrollHeight <= board.clientHeight + 1 && board.scrollWidth <= board.clientWidth + 1) {
       density = candidate;
       break;
     }
   }
   board.dataset.boardDensity = density;
-  const overflowing = board.scrollHeight > board.clientHeight + 1;
+  // Extremely crowded or short viewports need a continuous final fit.
+  // CSS zoom participates in layout and preserves pointer hit testing.
+  let scale = 1;
+  while ((board.scrollHeight > board.clientHeight + 1 || board.scrollWidth > board.clientWidth + 1) && scale > 0.2) {
+    scale = Math.round((scale - 0.05) * 100) / 100;
+    board.style.setProperty('--board-scale', String(scale));
+  }
+  const overflowing = board.scrollHeight > board.clientHeight + 1 || board.scrollWidth > board.clientWidth + 1;
   board.classList.toggle('board-overflowing', overflowing);
   const status = document.querySelector('[data-board-density-status]');
   if (status) {
@@ -1186,6 +1196,18 @@ function render() {
   updateClock();
   fitBoardDensity();
   restoreScrollState(scrollState, sequence);
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => {
+    if (sequence === renderSequence) fitBoardDensity();
+  });
+  if (typeof ResizeObserver === 'function') {
+    boardResizeObserver?.disconnect();
+    boardResizeObserver = new ResizeObserver(() => {
+      clearTimeout(boardFitTimer);
+      boardFitTimer = setTimeout(fitBoardDensity, 50);
+    });
+    const board = document.querySelector('.board-grid');
+    if (board) boardResizeObserver.observe(board);
+  }
   syncWorksheetHeaders();
   syncPublicRoomsRefresh();
 }

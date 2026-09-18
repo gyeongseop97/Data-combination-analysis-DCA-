@@ -1495,3 +1495,36 @@ body[data-theme="sheet"] .board-grid[data-board-density="nano"] { --board-meld-m
 .game-theme-button{display:inline-flex;align-items:center;justify-content:center;border:1px solid currentColor;border-radius:5px;background:transparent;color:inherit;padding:3px 7px;font-size:11px;font-weight:700;white-space:nowrap;}
 @media (max-width:620px){body[data-theme="sheet"] .compact-theme{display:inline-grid !important;} .game-page .game-theme-button{display:inline-flex;}}
 @media (max-width:1024px) and (orientation:landscape) and (max-height:700px){.game-page .game-banner{min-height:24px;padding:1px 4px;}.game-page .game-banner .room-label h1{font-size:9px;}.game-page .game-banner .turn-status{min-height:22px;padding:1px 4px;}.game-page .room-title-row{gap:3px;}}
+/* Density must override theme-specific tile sizes. */
+body[data-theme] .game-page .board-grid .meld { min-width: min(100%, var(--board-meld-min)); max-width: 100%; margin: var(--board-meld-margin); padding: var(--board-meld-padding); flex: 0 1 auto; }
+body[data-theme] .game-page .board-grid .tile { width: var(--board-tile-width); min-width: 0; height: var(--board-tile-height); min-height: 0; font-size: var(--board-tile-font); flex: 0 0 var(--board-tile-width); }
+body[data-theme] .game-page .board-grid .tile-target { min-width: 0; width: var(--board-target-width); height: var(--board-target-height); min-height: 0; flex: 0 0 var(--board-target-width); padding: 0; }
+body[data-theme] .game-page .board-grid .tile-target span { display: none; }
+body[data-theme] .game-page .board-grid .meld-header { min-width: 0; gap: 2px; overflow: hidden; white-space: nowrap; }
+@media (max-width: 820px) and (orientation: portrait), (max-width: 1024px) and (orientation: landscape) and (max-height: 700px) {
+ body[data-theme]:has(.game-page) .game-banner { grid-template-columns: minmax(0,1fr) auto; gap: 4px; }
+ body[data-theme]:has(.game-page) .pool-badge { display: none; }
+ body[data-theme]:has(.game-page) .room-label { min-width: 0; }
+ body[data-theme]:has(.game-page) .room-title-row h1 { flex: 1; }
+ body[data-theme]:has(.game-page) .game-home-button, body[data-theme]:has(.game-page) .game-theme-button { flex-shrink: 0; }
+ body[data-theme]:has(.game-page) .board-toolbar { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 2px; flex-shrink: 0; }
+ body[data-theme]:has(.game-page) .board-toolbar .selected-label, body[data-theme]:has(.game-page) .board-card .formula-bar { display: none; }
+ body[data-theme]:has(.game-page) .rack-card { min-height: 0; max-height: 34dvh; display: flex; flex-direction: column; overflow: hidden; }
+ body[data-theme]:has(.game-page) .rack-tiles { min-height: 0; overflow-y: auto; flex: 1 1 auto; }
+ body[data-theme]:has(.game-page) .rack-heading, body[data-theme]:has(.game-page) .turn-actions { flex-shrink: 0; }
+ body[data-theme]:has(.game-page) .opening-alert { flex-shrink: 0; margin: 2px 4px; padding: 2px 4px; font-size: 8px; }
+ body[data-theme]:has(.game-page) .board-grid .tile.selected { transform: none; }
+}
+@media (max-width: 1024px) and (orientation: landscape) and (max-height: 700px) {
+ body[data-theme="classic"]:has(.game-page) .topbar.compact { display: none; }
+ body[data-theme]:has(.game-page) .rack-card { max-height: 35dvh; }
+}@media (max-width: 820px) and (orientation: portrait), (max-width: 1024px) and (orientation: landscape) and (max-height: 700px) {
+ body[data-theme]:has(.game-page) .sheet-menu { display: none; }
+ body[data-theme]:has(.game-page) .empty-board { min-width: 0; min-height: 0; }
+ body[data-theme]:has(.game-page) .empty-board span { font-size: 20px; }
+ body[data-theme]:has(.game-page) .empty-board p { margin: 3px 0; font-size: 10px; }
+ body[data-theme]:has(.game-page) .empty-board small { font-size: 8px; }
+}
+body[data-theme] .game-page .board-grid[data-board-density='nano'] .meld-header { display: none; }
+
+body[data-theme] .game-page .board-grid .meld { zoom: var(--board-scale, 1); }
