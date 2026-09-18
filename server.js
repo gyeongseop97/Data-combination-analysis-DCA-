@@ -422,7 +422,7 @@ function buildAiMove(room, player) {
   // Prefer a complete rack-only meld. It is always a legal, simple move and does
   // not disturb a human player's table layout.
   if (candidates.length) {
-    const chosen = candidates[0];
+    const chosen = candidates.find(({ run }) => tiles.every((tile, index) => tile.kind === 'joker' || tile.value === run[index])) || candidates[0];
     const used = new Set(chosen.tileIds);
     return {
       board: [...existingBoard, { id: randomId('ai-'), tileIds: chosen.tileIds }],
@@ -556,10 +556,10 @@ function validateRun(tiles) {
     }
   }
   if (!candidates.length) return null;
-  // An ambiguous joker is resolved to the highest possible legitimate run. This
+  // Honor an explicitly ordered valid run; otherwise use the highest valid run. This
   // makes the represented value explicit and is favorable during a 30-point opening.
   candidates.sort((a, b) => b.run.reduce((sum, value) => sum + value, 0) - a.run.reduce((sum, value) => sum + value, 0));
-  const chosen = candidates[0];
+  const chosen = candidates.find(({ run }) => tiles.every((tile, index) => tile.kind === 'joker' || tile.value === run[index])) || candidates[0];
   const jokerBindings = {};
   jokers.forEach((joker, index) => {
     jokerBindings[joker.id] = { color, value: chosen.missing[index] };
@@ -584,6 +584,7 @@ function validateMeld(tileIds) {
 }
 
 function sortMeldTiles(tileIds, details) {
+  if (details.type === 'group' && tileIds.some((id) => TILE_CATALOG.get(id)?.kind === 'joker')) return [...tileIds];
   const face = (id) => {
     const tile = TILE_CATALOG.get(id);
     return tile.kind === 'joker' ? details.jokerBindings[id] : tile;

@@ -267,23 +267,46 @@ function inferredMeldType(tiles) {
 
 function sortDraftMeld(group) {
   if (!group?.tiles?.length) return;
-  // New, incomplete, and unresolved-joker groups keep their explicit drop order.
-  // The server supplies the canonical order once it has resolved a joker.
-  const type = group.type || inferredMeldType(group.tiles);
-  const faces = group.tiles.map(knownTileFace);
-  if (!type || faces.some((face) => !face)) return;
-
-  group.tiles = group.tiles
-    .map((tile, index) => ({ tile, face: knownTileFace(tile), index }))
-    .sort((left, right) => {
-      const valueDelta = Number(left.face.value) - Number(right.face.value);
-      if (valueDelta) return valueDelta;
-      const colorDelta = colors.indexOf(left.face.color) - colors.indexOf(right.face.color);
-      return colorDelta || left.index - right.index;
-    })
+  const tiles = group.tiles;
+  const normals = tiles.filter((tile) => tile.kind !== 'joker');
+  const jokers = tiles.filter((tile) => tile.kind === 'joker');
+  // A joker's previous face belongs to the previous composition, never this edit.
+  jokers.forEach((tile) => { delete tile.resolvedFace; });
+  group.type = '';
+  if (!normals.length || tiles.length < 3) return;
+  const sameValue = normals.every((tile) => tile.value === normals[0].value);
+  const usedColors = new Set(normals.map((tile) => tile.color));
+  if (tiles.length <= 4 && sameValue && usedColors.size === normals.length) {
+    group.type = 'group';
+    const missingColors = colors.filter((color) => !usedColors.has(color));
+    jokers.forEach((tile, index) => {
+      tile.resolvedFace = { color: missingColors[index], value: normals[0].value };
+    });
+    // Every position is equivalent in a group; allow explicit joker repositioning.
+    if (jokers.length) return;
+  } else {
+    if (tiles.length > 13 || normals.some((tile) => tile.color !== normals[0].color)) return;
+    const values = new Set(normals.map((tile) => tile.value));
+    if (values.size !== normals.length) return;
+    const candidates = [];
+    for (let start = 1; start <= 14 - tiles.length; start += 1) {
+      const run = Array.from({ length: tiles.length }, (_, index) => start + index);
+      if (normals.every((tile) => run.includes(tile.value))) candidates.push(run);
+    }
+    if (!candidates.length) return;
+    const run = candidates.find((candidate) => tiles.every((tile, index) => tile.kind === 'joker' || tile.value === candidate[index]))
+      || candidates[candidates.length - 1];
+    const missing = run.filter((value) => !values.has(value));
+    jokers.forEach((tile, index) => {
+      tile.resolvedFace = { color: normals[0].color, value: missing[index] };
+    });
+    group.type = 'run';
+  }
+  group.tiles = tiles.map((tile, index) => ({ tile, face: knownTileFace(tile), index }))
+    .sort((left, right) => Number(left.face.value) - Number(right.face.value)
+      || colors.indexOf(left.face.color) - colors.indexOf(right.face.color) || left.index - right.index)
     .map(({ tile }) => tile);
 }
-
 function sortDraftMelds() {
   if (!draft) return;
   draft.groups.forEach(sortDraftMeld);
@@ -1300,7 +1323,7 @@ function moveDraftTile(drag, destination) {
       return false;
     }
     if (drag.source === 'group' && drag.groupId === destination.groupId
-      && (!destination.targetTileId || tileIds.includes(destination.targetTileId))) return false;
+      && (tileIds.includes(destination.targetTileId) || tileIds.length === targetGroup.tiles.length)) return false;
   }
   if (destination.type === 'rack' && drag.source === 'rack'
     && destination.targetTileId && tileIds.includes(destination.targetTileId)) return false;
