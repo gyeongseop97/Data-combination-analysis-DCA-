@@ -1717,7 +1717,7 @@ body[data-theme="sheet"] .chat-message p { border-color: #dce3de; border-radius:
 body[data-theme="sheet"] .chat-message.mine p { border-color: #bddbc8; background: #edf7f0; }
 body[data-theme="sheet"] .chat-compose button { color: #fff; border-radius: 2px; background: #217346; }
 body[data-theme="sheet"] .chat-feedback { color: #a82c23; }
-/* Color is redundant: each number also has a persistent, neutral shape cue.
+/* Color is redundant: each number also has a persistent, matching shape cue.
    SVG avoids platform-specific emoji, and never intercepts tile drag/hold. */
 .tile {
   display: inline-flex;
@@ -1737,7 +1737,7 @@ body[data-theme="sheet"] .chat-feedback { color: #a82c23; }
   height: .48em;
   width: min(.48em, 24cqi);
   height: min(.48em, 24cqi);
-  color: #243238;
+  color: inherit;
   fill: currentColor;
   pointer-events: none;
   user-select: none;
