@@ -1496,7 +1496,8 @@ body[data-theme="sheet"] .board-grid[data-board-density="nano"] { --board-meld-m
 @media (max-width:620px){body[data-theme="sheet"] .compact-theme{display:inline-grid !important;} .game-page .game-theme-button{display:inline-flex;}}
 @media (max-width:1024px) and (orientation:landscape) and (max-height:700px){.game-page .game-banner{min-height:24px;padding:1px 4px;}.game-page .game-banner .room-label h1{font-size:9px;}.game-page .game-banner .turn-status{min-height:22px;padding:1px 4px;}.game-page .room-title-row{gap:3px;}}
 /* Density must override theme-specific tile sizes. */
-body[data-theme] .game-page .board-grid .meld { min-width: min(100%, var(--board-meld-min)); max-width: 100%; margin: var(--board-meld-margin); padding: var(--board-meld-padding); flex: 0 1 auto; }
+/* Keep melds readable and move the next whole meld to a new row before fitting smaller tiles. */
+body[data-theme] .game-page .board-grid .meld { min-width: min(100%, var(--board-meld-min)); max-width: 100%; margin: var(--board-meld-margin); padding: var(--board-meld-padding); flex: 0 0 auto; }
 body[data-theme] .game-page .board-grid .tile { width: var(--board-tile-width); min-width: 0; height: var(--board-tile-height); min-height: 0; font-size: var(--board-tile-font); flex: 0 0 var(--board-tile-width); }
 body[data-theme] .game-page .board-grid .tile-target { min-width: 0; width: var(--board-target-width); height: var(--board-target-height); min-height: 0; flex: 0 0 var(--board-target-width); padding: 0; }
 body[data-theme] .game-page .board-grid .tile-target span { display: none; }

@@ -1551,16 +1551,10 @@ function fitBoardDensity() {
   if (board.clientWidth === 0 || board.clientHeight === 0) return;
   board.style.setProperty('--board-scale', '1');
   const densities = ['normal', 'compact', 'tight', 'ultra', 'micro', 'nano'];
-  const tileCount = board.querySelectorAll('.meld .tile').length;
-  const meldCount = board.querySelectorAll('.meld').length;
-  const preferredIndex = tileCount >= 72 || meldCount >= 17 ? 5
-    : tileCount >= 48 || meldCount >= 11 ? 4
-      : tileCount >= 32 || meldCount >= 8 ? 3
-        : tileCount >= 20 || meldCount >= 5 ? 2
-          : tileCount >= 10 || meldCount >= 3 ? 1
-            : 0;
+  // Fill every available row at the largest readable size before shrinking.
+  // Tile/meld counts alone say nothing about the actual space left on a board.
   let density = densities[densities.length - 1];
-  for (const candidate of densities.slice(preferredIndex)) {
+  for (const candidate of densities) {
     board.dataset.boardDensity = candidate;
     if (board.scrollHeight <= board.clientHeight + 1 && board.scrollWidth <= board.clientWidth + 1) {
       density = candidate;
@@ -1582,8 +1576,8 @@ function fitBoardDensity() {
     status.hidden = density === 'normal' && !overflowing;
     const compressionName = { compact: '한 단계', tight: '두 단계', ultra: '세 단계', micro: '네 단계', nano: '다섯 단계' }[density] || '여러 단계';
     status.textContent = overflowing
-      ? '패가 많아 가장 작은 보기로 압축해 표시 중입니다'
-      : `패가 많아 ${compressionName} 압축해 표시 중입니다`;
+      ? '보드 공간에 맞춰 가장 작은 보기로 표시 중입니다'
+      : `보드 공간에 맞춰 ${compressionName} 축소해 표시 중입니다`;
   }
 }
 function restoreScrollState(snapshot, sequence) {
