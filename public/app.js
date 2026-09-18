@@ -6,6 +6,7 @@ const CLIENT_KEY = 'office-rummikub-client';
 const THEME_KEY = 'office-rummikub-theme';
 const RACK_ORDER_PREFIX = 'office-rummikub-rack-order';
 const SOLO_SESSION_KEY = 'office-rummikub-solo-session';
+const FORFEIT_RECEIPT_PREFIX = 'office-rummikub-forfeit-win';
 // Migrate old persistent solo sessions to tab-scoped storage.
 localStorage.removeItem(SOLO_SESSION_KEY);
 const colors = ['red', 'blue', 'orange', 'black'];
@@ -49,6 +50,8 @@ let lastDragAt = 0;
 let pendingInteractiveRender = false;
 let batchSelection = null;
 const rackOrderCache = new Map();
+const seenDepartureIds = new Set();
+const forfeitReceiptCache = new Map();
 let tileHold = null;
 let tileHoldDelayTimer = null;
 let tileHoldStepTimer = null;
@@ -72,13 +75,63 @@ function shortCode(value) {
   return String(value || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
 }
 
-function showToast(message, kind = '') {
+function showToast(message, kind = '', duration = 3600) {
   clearTimeout(toastTimer);
   toast.textContent = message;
   toast.className = `toast show ${kind}`;
-  toastTimer = setTimeout(() => { toast.className = 'toast'; }, 3600);
+  toastTimer = setTimeout(() => { toast.className = 'toast'; }, duration);
 }
 
+function latestForfeitReceipt(viewerId = clientId) {
+  if (forfeitReceiptCache.has(viewerId)) return forfeitReceiptCache.get(viewerId);
+  try {
+    const receipt = JSON.parse(localStorage.getItem(`${FORFEIT_RECEIPT_PREFIX}:${viewerId}`) || 'null');
+    if (receipt?.winnerId === viewerId && receipt.id && Number.isFinite(receipt.confirmedAt)) {
+      forfeitReceiptCache.set(viewerId, receipt);
+      return receipt;
+    }
+  } catch { /* Storage can be unavailable in private browsing. */ }
+  return null;
+}
+
+function rememberForfeitWin(result, roomCode, viewerId = clientId) {
+  if (!result?.id || !result.winnerIds?.includes(viewerId)) return false;
+  const previous = latestForfeitReceipt(viewerId);
+  if (previous?.id === result.id || previous?.confirmedAt > result.confirmedAt) return false;
+  const receipt = {
+    id: result.id,
+    winnerId: viewerId,
+    roomCode,
+    confirmedAt: Number(result.confirmedAt) || Date.now(),
+    opponentName: String(result.departedPlayer?.name || '상대'),
+  };
+  forfeitReceiptCache.set(viewerId, receipt);
+  try { localStorage.setItem(`${FORFEIT_RECEIPT_PREFIX}:${viewerId}`, JSON.stringify(receipt)); } catch { /* Keep in memory. */ }
+  return true;
+}
+
+function receiveDepartureNotice(snapshot) {
+  rememberForfeitWin(snapshot?.forfeitResult, snapshot?.room?.code, snapshot?.you?.id);
+  const unseen = (snapshot?.departures || []).filter((entry) => entry.id && !seenDepartureIds.has(entry.id));
+  for (const entry of unseen) seenDepartureIds.add(entry.id);
+  if (!unseen.length) return;
+  // A room has at most four departures; keep memory bounded across many matches.
+  while (seenDepartureIds.size > 64) seenDepartureIds.delete(seenDepartureIds.values().next().value);
+  const names = unseen.map((entry) => entry.player?.name || '상대').join(', ');
+  const won = snapshot.forfeitResult?.winnerIds?.includes(snapshot.you?.id);
+  showToast(`${names}님이 나갔습니다. AI가 이어서 플레이합니다.${won ? ' 몰수승이 확정되어 언제 나가도 승리는 유지됩니다.' : ''}`, '', 6500);
+}
+
+function forfeitNoticeHtml() {
+  if (!state?.forfeitResult?.winnerIds?.includes(state.you?.id)) return '';
+  return '<span class="forfeit-notice" data-forfeit-notice role="status" title="상대가 나가 몰수승이 확정되었습니다. AI 이어하기를 종료해도 승리는 유지됩니다."><b>몰수승 확정</b><span>AI 이어하기 · 나가도 승리 유지</span></span>';
+}
+
+function forfeitHistoryHtml() {
+  const receipt = latestForfeitReceipt();
+  if (!receipt) return '';
+  return `<section class="forfeit-history" data-forfeit-history aria-label="최근 몰수승 기록"><strong>최근 몰수승 기록</strong><span>${escapeHtml(receipt.opponentName)}님의 퇴장으로 승리가 확정되었습니다. AI 이어하기 결과와 관계없이 유지됩니다.</span></section>`;
+}
 function theme() {
   return localStorage.getItem(THEME_KEY) === 'classic' ? 'classic' : 'sheet';
 }
@@ -759,6 +812,7 @@ function receiveState(nextState) {
   );
   const previousPhase = state?.room?.phase;
   state = nextState;
+  receiveDepartureNotice(nextState);
   if (activeRoomCode && previousPhase && previousPhase !== nextState?.room?.phase) syncScreenUrl(nextState);
   if (Number.isFinite(Number(nextState?.serverNow))) serverClockOffsetMs = Date.now() - Number(nextState.serverNow);
   latestStateDigest = stateDigest(nextState);
@@ -798,7 +852,7 @@ async function refreshRoomState() {
     else renderConnectionOnly();
   } catch (error) {
     if (error.stale) return;
-    if (error.status === 404 || error.status === 410) { goHome(false); showToast('방장이 나가 방이 종료되었습니다.'); return; }
+    if (error.status === 404 || error.status === 410) { goHome(false); showToast('참가 중인 방이 종료되었습니다.'); return; }
     connection = 'reconnecting';
     renderConnectionOnly();
   } finally {
@@ -884,8 +938,12 @@ function leaveLobbySilently(code) {
   void api(`/api/rooms/${code}/leave`, {
     method: 'POST', keepalive: true,
     body: JSON.stringify({ clientId }),
-  }).then(() => {
-    if (isHomeView()) void refreshPublicRooms();
+  }).then((response) => {
+    const saved = rememberForfeitWin(response.forfeitResult, code);
+    if (isHomeView()) {
+      if (saved) render();
+      void refreshPublicRooms();
+    }
   }).catch(() => {
     // Leaving is best-effort: a stale local server or a lost connection must not trap the UI.
   });
@@ -895,6 +953,8 @@ function goHome(notifyRoom = true) {
   globalThis.gameViewEpoch = (globalThis.gameViewEpoch || 0) + 1;
   clearTimeout(draftSyncTimer);
   const codeToLeave = activeRoomCode;
+  const confirmedWin = Boolean(state?.forfeitResult?.winnerIds?.includes(state.you?.id));
+  rememberForfeitWin(state?.forfeitResult, codeToLeave, state?.you?.id);
   const shouldReleaseLobbySeat = Boolean(notifyRoom && state?.you && !isStatelessSolo());
   clearBatchSelection();
   eventSource?.close();
@@ -911,6 +971,7 @@ function goHome(notifyRoom = true) {
   localStorage.removeItem(ROOM_KEY);
   history.replaceState({ dcaScreen: 'home' }, '', screenUrl('home'));
   render();
+  if (confirmedWin) showToast('몰수승은 확정되었습니다. AI 이어하기를 종료했습니다.');
   if (shouldReleaseLobbySeat) leaveLobbySilently(codeToLeave);
 }
 
@@ -986,6 +1047,7 @@ function classicHomePage(code) {
           <span>AI 게임</span><span>친구와 대전</span><span>자동 동기화</span>
         </div>
       </section>
+      ${forfeitHistoryHtml()}
       <section class="entry-grid">
         <form id="soloGameForm" class="entry-card solo-card">
           <div class="card-heading"><span class="step">01</span><div><p class="eyebrow">AI SOLO</p><h2>AI와 혼자 하기</h2></div></div>
@@ -1043,6 +1105,7 @@ function spreadsheetHomePage(code) {
             </div>
             <dl><div><dt>상태</dt><dd>준비</dd></div><div><dt>버전</dt><dd>v1.0</dd></div><div><dt>표시</dt><dd>100%</dd></div></dl>
           </section>
+          ${forfeitHistoryHtml()}
           <section class="sheet-home-cards">
             <form id="soloGameForm" class="sheet-home-card sheet-home-auto-card">
               <div class="sheet-home-card-title"><span>01</span><div><p>AI SOLO</p><h2>AI 게임</h2></div></div>
@@ -1193,8 +1256,8 @@ function selectedLabel() {
 function opponentsHtml() {
   return state.room.players.map((player) => {
     const status = player.isActive
-      ? (player.isBot ? 'AI가 수를 계산 중' : '지금 플레이 중')
-      : player.hasOpened ? '첫 등록 완료' : '첫 등록 전';
+      ? (player.isBot ? (player.replacedPlayerName ? 'AI가 이어서 플레이 중' : 'AI가 수를 계산 중') : '지금 플레이 중')
+      : player.replacedPlayerName ? '퇴장한 참가자 대신 플레이' : player.hasOpened ? '첫 등록 완료' : '첫 등록 전';
     return `
       <article class="seat-card ${player.isActive ? 'active' : ''} ${player.isYou ? 'me' : ''} ${player.isBot ? 'bot' : ''}">
         <div class="seat-top"><span class="avatar">${player.isBot ? 'AI' : escapeHtml(player.name.slice(0, 1))}</span><span>${escapeHtml(player.name)}${player.isYou ? ' <small>나</small>' : ''}</span>${player.isBot ? '<i class="ai-chip">AI</i>' : player.host ? '<i>방장</i>' : ''}</div>
@@ -1269,7 +1332,7 @@ function gamePage() {
         <div class="workbook-sheet-content">
           <div class="sheet-menu" aria-hidden="true"><span>파일</span><span>편집</span><span>보기</span><span>게임</span><div></div><small>공유됨 · 자동 저장됨</small></div>
           <section class="game-banner">
-            <div class="room-label"><span class="eyebrow">${soloMode ? 'AI PRACTICE' : `ROOM ${state.room.code}`}</span><div class="room-title-row"><h1>${escapeHtml(GAME_TITLE)}</h1><button class="game-home-button" type="button" data-action="home" aria-label="게임을 나가 첫 화면으로" title="첫 화면으로"><span aria-hidden="true">⌂</span><span>홈</span></button><button class="game-theme-button" type="button" data-action="theme" data-theme="${theme() === 'sheet' ? 'classic' : 'sheet'}">${theme() === 'sheet' ? '기본' : '엑셀'}</button></div></div>
+            <div class="room-label"><span class="eyebrow">${soloMode ? 'AI PRACTICE' : `ROOM ${state.room.code}`}</span><div class="room-title-row"><h1>${escapeHtml(GAME_TITLE)}</h1>${forfeitNoticeHtml()}<button class="game-home-button" type="button" data-action="home" aria-label="게임을 나가 첫 화면으로" title="첫 화면으로"><span aria-hidden="true">⌂</span><span>홈</span></button><button class="game-theme-button" type="button" data-action="theme" data-theme="${theme() === 'sheet' ? 'classic' : 'sheet'}">${theme() === 'sheet' ? '기본' : '엑셀'}</button></div></div>
 
             <div class="pool-badge"><span>풀</span><strong>${state.poolCount}</strong></div>
           </section>
@@ -1306,12 +1369,16 @@ function resultOverlay() {
   const result = state.result;
   if (!result) return '';
   const winnerNames = result.winnerIds.map((id) => result.scores.find((score) => score.id === id)?.name).filter(Boolean).join(', ');
+  const forfeit = result.reason === 'opponent-left';
+  const heading = forfeit
+    ? (result.winnerIds.includes(state.you.id) ? '몰수승 확정' : `${winnerNames} 몰수승`)
+    : winnerNames ? `${winnerNames} ${result.winnerIds.length > 1 ? '공동 승리' : '승리'}` : '게임 종료';
   return `
     <div class="result-overlay">
       <section class="result-card">
         <p class="eyebrow">GAME COMPLETE</p>
-        <h2>${winnerNames ? `${escapeHtml(winnerNames)} ${result.winnerIds.length > 1 ? '공동 승리' : '승리'}` : '게임 종료'}</h2>
-        <p>${result.reason === 'player-left' ? '참가자가 나가 게임이 종료되었습니다.' : result.reason === 'empty-rack' ? '손패를 모두 내려 먼저 승리했습니다.' : '풀이 소진되어 가장 낮은 손패 합계로 종료했습니다.'}</p>
+        <h2>${escapeHtml(heading)}</h2>
+        <p>${forfeit ? '상대 퇴장 시 확정된 승리와 점수입니다. AI 이어하기 결과와 관계없이 유지됩니다.' : result.reason === 'player-left' ? '참가자가 나가 게임이 종료되었습니다.' : result.reason === 'empty-rack' ? '손패를 모두 내려 먼저 승리했습니다.' : '풀이 소진되어 가장 낮은 손패 합계로 종료했습니다.'}</p>
         <div class="score-table">${result.scores.map((score) => `<div class="${result.winnerIds.includes(score.id) ? 'winner' : ''}"><span>${escapeHtml(score.name)}</span><small>손패 ${score.tilesLeft}장 · ${score.tileTotal}점</small><strong>${score.score > 0 ? '+' : ''}${score.score}</strong></div>`).join('')}</div>
         ${state.room.mode === 'solo' ? '<button class="primary-button" data-action="play-solo-again">AI와 다시 하기 <span>↻</span></button>' : ''}
         <button class="${state.room.mode === 'solo' ? 'secondary-button' : 'primary-button'}" data-action="home">첫 화면으로 <span>→</span></button>

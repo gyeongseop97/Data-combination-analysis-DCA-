@@ -1,5 +1,15 @@
 const assert = require('assert');
 const { Redis } = require('@upstash/redis');
+const { Client } = require('@upstash/qstash');
+const scheduledRequests = [];
+Client.prototype.publishJSON = async function (request) {
+  scheduledRequests.push(request);
+  return { messageId: 'test' };
+};
+process.env.QSTASH_TOKEN = 'test';
+process.env.QSTASH_CURRENT_SIGNING_KEY = 'test';
+process.env.QSTASH_NEXT_SIGNING_KEY = 'test';
+process.env.DCA_APP_ORIGIN = 'https://example.test';
 
 class FakeRedis {
   constructor() {
@@ -124,10 +134,18 @@ async function run() {
   assert.equal(afterTimeout.activeIndex, 1);
   assert.ok(Number(afterTimeout.deadlineAt) > Date.now() - 1000);
 
-  // Explicit owner exit deletes only that room, never another member's room.
+  // An outsider cannot close a room. A playing owner transfers their seat and
+  // hosting to the remaining human, who may leave with their win intact.
   assert.equal((await service.leaveRoom(observer, created.roomCode)).left, false);
   assert.ok(await store.getRoom(created.roomCode));
   await service.leaveRoom(host, created.roomCode);
+  const ownerReplaced = await store.getRoom(created.roomCode);
+  assert.equal(ownerReplaced.phase, 'playing');
+  assert.equal(ownerReplaced.hostId, guest.id);
+  assert.equal(ownerReplaced.players[0].isBot, true);
+  assert.deepEqual(ownerReplaced.forfeitResult.winnerIds, [guest.id]);
+  const winningExit = await service.leaveRoom(guest, created.roomCode);
+  assert.deepEqual(winningExit.forfeitResult, ownerReplaced.forfeitResult);
   assert.equal(await store.getRoom(created.roomCode), null);
   assert.equal((await service.scheduledAction({roomCode:created.roomCode,kind:'turn'})).accepted,false);
   const closeRoom = await service.createRoom(host, {playerName:'Host',visibility:'public',maxPlayers:4,turnSeconds:30});
@@ -145,15 +163,102 @@ async function run() {
   await service.scheduledAction({roomCode:closeRoom.roomCode,kind:'departure'});
   assert.equal(await store.getRoom(closeRoom.roomCode),null);
   assert.equal((await service.listPublicRooms(guest,20)).rooms.some(r=>r.code===closeRoom.roomCode),false);
-  const playing=await service.createRoom(host,{playerName:'Host',turnSeconds:30});
-  await service.joinRoom(guest,playing.roomCode,{playerName:'Guest'});
-  await service.roomAction(host,playing.roomCode,{action:'start'});
-  await service.leaveRoom(guest,playing.roomCode);
-  const ended=await service.roomState(host,playing.roomCode);
-  assert.equal(ended.room.phase,'finished');assert.equal(ended.result.reason,'player-left');
-  assert.ok(await store.getRoom(playing.roomCode),'guest exit must not delete host room');
-  await service.leaveRoom(host,playing.roomCode);
-  console.log('explicit leave, delayed window close, reconnect and cancelled tasks: passed');
+  const playing = await service.createRoom(host, { playerName: 'Host', turnSeconds: 30 });
+  await service.joinRoom(guest, playing.roomCode, { playerName: 'Guest' });
+  await service.roomAction(host, playing.roomCode, { action: 'start' });
+  const prepared = await store.getRoom(playing.roomCode);
+  prepared.activeIndex = 1;
+  prepared.deadlineAt = Date.now() + 30000;
+  prepared.aiDueAt = null;
+  prepared.players[0].rack = ['n-orange-13-1'];
+  prepared.players[1].rack = ['n-red-1-1', 'n-blue-2-1'];
+  const used = prepared.players.flatMap(player => player.rack);
+  prepared.deck = require('../server').ALL_TILE_IDS.filter(id => !used.includes(id));
+  await store.saveRoom(prepared, prepared.revision);
+  const requestIndex = scheduledRequests.length;
+  await service.leaveRoom(guest, playing.roomCode);
+  const continuing = await service.roomState(host, playing.roomCode);
+  assert.equal(continuing.room.phase, 'playing');
+  assert.equal(continuing.result, null);
+  assert.deepEqual(continuing.forfeitResult.winnerIds, [host.id]);
+  const ai = continuing.room.players[1];
+  assert.equal(ai.isBot, true);
+  assert.notEqual(ai.id, guest.id);
+  const aiRequest = scheduledRequests.slice(requestIndex).find(request =>
+    request.body.roomCode === playing.roomCode && request.body.kind === 'ai');
+  assert.ok(aiRequest, 'direct leave must persist and schedule the replacement AI');
+  assert.equal(aiRequest.body.playerId, ai.id);
+  const replayedLeave = await service.leaveRoom(guest, playing.roomCode);
+  assert.equal(replayedLeave.deleted, false, 'repeated departure must never delete the surviving match');
+  assert.deepEqual(replayedLeave.forfeitResult, continuing.forfeitResult);
+  assert.equal((await store.getRoom(playing.roomCode)).departures.length, 1);
+  await assert.rejects(() => service.roomState(guest, playing.roomCode), error => error?.statusCode === 404);
+  await assert.rejects(() => service.roomAction(guest, playing.roomCode, { action: 'draw' }));
+  await assert.rejects(() => service.joinRoom(guest, playing.roomCode, { playerName: 'Returning' }));
+  const due = await store.getRoom(playing.roomCode);
+  due.aiDueAt = Date.now() - 1;
+  await store.saveRoom(due, due.revision);
+  const aiEvent = { roomCode: due.code, kind: 'ai', playerId: ai.id, dueAt: due.aiDueAt, deadlineAt: due.deadlineAt };
+  assert.equal((await service.scheduledAction(aiEvent)).accepted, true);
+  const resolved = await service.roomState(host, playing.roomCode);
+  assert.equal(resolved.turn.activePlayerId, host.id);
+  assert.equal(resolved.room.players[1].tileCount, 3, 'AI must actually draw and advance the turn');
+  assert.deepEqual(resolved.forfeitResult, continuing.forfeitResult);
+  assert.equal((await service.scheduledAction(aiEvent)).accepted, false);
+  const finalExit = await service.leaveRoom(host, playing.roomCode);
+  assert.equal(finalExit.deleted, true);
+  assert.deepEqual(finalExit.forfeitResult, continuing.forfeitResult);
+  assert.equal(await store.getRoom(playing.roomCode), null);
+
+  // A reload inside the disconnect grace period retains the human seat. Only
+  // a confirmed departure awards the win and schedules a replacement AI.
+  const delayed = await service.createRoom(host, { playerName: 'Host', turnSeconds: 30 });
+  await service.joinRoom(guest, delayed.roomCode, { playerName: 'Guest' });
+  await service.roomAction(host, delayed.roomCode, { action: 'start' });
+  const firstDisconnect = await service.leaveRoom(guest, delayed.roomCode, { disconnect: true });
+  const repeatDisconnect = await service.leaveRoom(guest, delayed.roomCode, { disconnect: true });
+  assert.equal(repeatDisconnect.dueAt, firstDisconnect.dueAt, 'duplicate beacons cannot extend departure grace');
+  let reloaded = await service.roomState(guest, delayed.roomCode);
+  assert.equal(reloaded.you.id, guest.id);
+  assert.ok(!reloaded.forfeitResult);
+  let waiting = await store.getRoom(delayed.roomCode);
+  assert.equal(waiting.pendingDepartures[guest.id], undefined);
+  await service.leaveRoom(guest, delayed.roomCode, { disconnect: true });
+  waiting = await store.getRoom(delayed.roomCode);
+  waiting.pendingDepartures[guest.id] = Date.now() - 1;
+  waiting.activeIndex = 1;
+  waiting.deadlineAt = Date.now() + 30000;
+  await store.saveRoom(waiting, waiting.revision);
+  const departureRequestIndex = scheduledRequests.length;
+  await service.scheduledAction({ roomCode: delayed.roomCode, kind: 'departure', playerId: guest.id });
+  const replaced = await store.getRoom(delayed.roomCode);
+  assert.equal(replaced.phase, 'playing');
+  assert.equal(replaced.players[1].isBot, true);
+  assert.deepEqual(replaced.forfeitResult.winnerIds, [host.id]);
+  assert.ok(scheduledRequests.slice(departureRequestIndex).some(request =>
+    request.body.roomCode === delayed.roomCode && request.body.kind === 'ai'));
+  assert.equal(replaced.departures.length, 1);
+  await service.scheduledAction({ roomCode: delayed.roomCode, kind: 'departure', playerId: guest.id });
+  assert.equal((await store.getRoom(delayed.roomCode)).departures.length, 1);
+  await service.leaveRoom(host, delayed.roomCode);
+  // Delayed scheduler delivery must not reverse who forfeited first: process
+  // an already-expired disconnect before the survivor's explicit exit.
+  const delayedDelivery = await service.createRoom(host, { playerName: 'Host', turnSeconds: 30 });
+  await service.joinRoom(guest, delayedDelivery.roomCode, { playerName: 'Guest' });
+  await service.roomAction(host, delayedDelivery.roomCode, { action: 'start' });
+  await service.leaveRoom(host, delayedDelivery.roomCode, { disconnect: true });
+  const expiredDisconnect = await store.getRoom(delayedDelivery.roomCode);
+  expiredDisconnect.pendingDepartures[host.id] = Date.now() - 1;
+  await store.saveRoom(expiredDisconnect, expiredDisconnect.revision);
+  // No state poll or scheduled departure runs between expiry and this exit.
+  const survivorExit = await service.leaveRoom(guest, delayedDelivery.roomCode);
+  assert.equal(survivorExit.left, true);
+  assert.equal(survivorExit.deleted, true, 'all humans have departed, so no AI-only room may remain');
+  assert.deepEqual(survivorExit.forfeitResult.winnerIds, [guest.id], 'the first disconnect must determine the winner');
+  assert.equal(survivorExit.forfeitResult.departedPlayer.id, host.id);
+  assert.equal(await store.getRoom(delayedDelivery.roomCode), null);
+  assert.equal((await service.scheduledAction({ roomCode: delayedDelivery.roomCode, kind: 'departure', playerId: host.id })).accepted, false);
+  console.log('AI takeover scheduling, preserved forfeit, delayed close and reconnect: passed');
   console.log('Redis-backed room service smoke test: passed');
 }
 

@@ -1620,3 +1620,17 @@ body[data-theme="sheet"] .game-page .seat-timer-progress-fill.urgent { backgroun
   .game-page .seat-timer-progress { height:2px; margin-top:2px; }
   .game-page .meld-validation-message { font-size:8px; }
 }
+
+/* Confirmed multiplayer outcome is separate from optional AI continuation. */
+.forfeit-notice { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; max-width: 100%; padding: 4px 7px; border: 1px solid rgba(198,228,109,.42); border-radius: 5px; color: #d4ee9a; background: rgba(198,228,109,.09); font-size: 10px; white-space: nowrap; }
+.forfeit-notice > span { font-size: 9px; opacity: .86; }
+.forfeit-history { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 14px; margin: 0 0 16px; padding: 10px 14px; border: 1px solid rgba(198,228,109,.35); border-radius: 6px; color: #d4ee9a; background: rgba(198,228,109,.08); font-size: 12px; line-height: 1.5; }
+.forfeit-history > span { color: #c0cfc3; font-size: 11px; overflow-wrap: anywhere; }
+body[data-theme="sheet"] .forfeit-notice, body[data-theme="sheet"] .forfeit-history { border-color: #b9d3c1; border-radius: 2px; color: #21623f; background: #eff8f1; }
+body[data-theme="sheet"] .forfeit-history > span { color: #44624e; }
+body[data-theme="sheet"] .sheet-home-canvas > .forfeit-history { margin: 12px 0; }
+@media (max-width: 1100px) { .forfeit-notice > span { display: none; } }
+@media (max-width: 820px) and (orientation: portrait), (max-width: 1024px) and (orientation: landscape) and (max-height: 700px) {
+  .game-page .forfeit-notice { padding: 2px 4px; font-size: 8px; }
+  .forfeit-history { padding: 8px 10px; gap: 4px; }
+}

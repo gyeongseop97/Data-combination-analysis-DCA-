@@ -152,6 +152,7 @@ function publicPlayer(room, player, viewerId) {
     id: player.id,
     name: player.name,
     isBot: Boolean(player.isBot),
+    replacedPlayerName: player.replacedPlayerName || null,
     host: player.id === room.hostId,
     tileCount: player.rack.length,
     hasOpened: player.hasOpened,
@@ -198,6 +199,9 @@ function roomView(room, viewerId) {
         }
       : null,
     result: room.result || null,
+    forfeitResult: room.forfeitResult || null,
+    continuationResult: room.continuationResult || null,
+    departures: room.departures || [],
     log: room.log,
     recentSubmissions: (room.recentSubmissions || []).map(serializeRecentSubmission),
     lastDrawTileId: room.lastDraw?.playerId === viewerId ? room.lastDraw.tileId : null,
@@ -239,10 +243,7 @@ function drawTiles(room, player, amount) {
   return drawn;
 }
 
-function finishGame(room, reason, winnerIds) {
-  clearTurnTimer(room);
-  room.phase = 'finished';
-  room.deadlineAt = null;
+function gameResult(room, reason, winnerIds) {
   const totals = Object.fromEntries(room.players.map((player) => [
     player.id,
     player.rack.reduce((sum, id) => sum + (TILE_CATALOG.get(id)?.kind === 'joker' ? 30 : TILE_CATALOG.get(id)?.value || 0), 0),
@@ -252,9 +253,9 @@ function finishGame(room, reason, winnerIds) {
   const winnerScore = singleWinner
     ? room.players.filter((player) => player.id !== singleWinner).reduce((sum, player) => sum + totals[player.id], 0)
     : 0;
-  room.result = {
+  return {
     reason,
-    winnerIds: winners,
+    winnerIds: [...winners],
     scores: room.players.map((player) => ({
       id: player.id,
       name: player.name,
@@ -263,7 +264,21 @@ function finishGame(room, reason, winnerIds) {
       score: player.id === singleWinner ? winnerScore : singleWinner ? -totals[player.id] : 0,
     })),
   };
-  log(room, reason === 'player-left' ? '참가자가 나가 게임이 종료되었습니다.' : reason === 'empty-rack' ? '누군가 손패를 모두 내려 게임이 끝났습니다.' : '풀의 타일이 소진되어 교착 상태로 게임이 끝났습니다.');
+}
+
+function finishGame(room, reason, winnerIds) {
+  clearTurnTimer(room);
+  room.phase = 'finished';
+  room.deadlineAt = null;
+  const result = gameResult(room, reason, winnerIds);
+  if (room.forfeitResult) {
+    room.continuationResult = result;
+    room.result = room.forfeitResult;
+    log(room, 'AI 이어하기가 끝났습니다. 상대 이탈로 확정된 몰수승은 그대로 유지됩니다.');
+  } else {
+    room.result = result;
+    log(room, reason === 'player-left' ? '참가자가 나가 게임이 종료되었습니다.' : reason === 'empty-rack' ? '누군가 손패를 모두 내려 게임이 끝났습니다.' : '풀의 타일이 소진되어 교착 상태로 게임이 끝났습니다.');
+  }
   broadcast(room);
 }
 
@@ -309,11 +324,11 @@ function expireTurn(room, expectedDeadline) {
   resolveNoTileDraw(room, player, 'timeout');
 }
 
-function beginTurn(room, index) {
+function beginTurn(room, index, minimumDeadline = 0) {
   clearTurnTimer(room);
   room.activeIndex = index;
   room.turnDirty = false;
-  room.deadlineAt = Date.now() + room.turnSeconds * 1000;
+  room.deadlineAt = Math.max(Date.now() + room.turnSeconds * 1000, minimumDeadline);
   const player = activePlayer(room);
   log(room, player.isBot ? `${player.name}가 수를 계산 중입니다.` : `${player.name}님의 턴입니다.`);
   const deadline = room.deadlineAt;
@@ -328,6 +343,10 @@ function startGame(room) {
   room.deck = shuffle(ALL_TILE_IDS);
   room.board = [];
   room.result = null;
+  room.forfeitResult = null;
+  room.continuationResult = null;
+  room.departures = [];
+  room.pendingDepartures = {};
   room.recentSubmissions = [];
   room.lastDraw = null;
   room.emptyPoolPasses = 0;
@@ -422,7 +441,7 @@ function buildAiMove(room, player) {
   // Prefer a complete rack-only meld. It is always a legal, simple move and does
   // not disturb a human player's table layout.
   if (candidates.length) {
-    const chosen = candidates.find(({ run }) => tiles.every((tile, index) => tile.kind === 'joker' || tile.value === run[index])) || candidates[0];
+    const chosen = candidates[0];
     const used = new Set(chosen.tileIds);
     return {
       board: [...existingBoard, { id: randomId('ai-'), tileIds: chosen.tileIds }],
@@ -781,6 +800,10 @@ function createRoom(payload) {
     turnDirty: false,
     emptyPoolPasses: 0,
     result: null,
+    forfeitResult: null,
+    continuationResult: null,
+    departures: [],
+    pendingDepartures: {},
     log: [],
     recentSubmissions: [],
     lastDraw: null,
@@ -816,10 +839,17 @@ function joinRoom(room, payload) {
 
 function leaveRoom(room, clientId, payload = {}) {
   const index = room.players.findIndex((player) => player.id === clientId);
-  if (index < 0) return { left: false, reason: 'not-member' };
+  if (index < 0) {
+    if (room.departures?.some((entry) => entry.player.id === clientId)) {
+      return { left: true, deleted: false, forfeitResult: room.forfeitResult || null };
+    }
+    return { left: false, reason: 'not-member' };
+  }
   if (payload.disconnect === true) {
-    const dueAt = Date.now() + 8000;
     room.pendingDepartures ||= {};
+    const existingDueAt = room.pendingDepartures[clientId];
+    if (existingDueAt) return { left: false, disconnecting: true, dueAt: existingDueAt, forfeitResult: room.forfeitResult || null };
+    const dueAt = Date.now() + 8000;
     room.pendingDepartures[clientId] = dueAt;
     if (!isDurableRuntime()) {
       const timer = setTimeout(() => {
@@ -827,22 +857,64 @@ function leaveRoom(room, clientId, payload = {}) {
       }, 8100);
       timer.unref?.();
     }
-    return { left: false, disconnecting: true, dueAt };
+    return { left: false, disconnecting: true, dueAt, forfeitResult: room.forfeitResult || null };
   }
   delete room.pendingDepartures?.[clientId];
+  const departingPlayer = room.players[index];
+  if (room.mode !== 'solo' && room.phase === 'playing') {
+    const remainingHumans = room.players.filter((player) => !player.isBot && player.id !== clientId);
+    const firstDeparture = !room.forfeitResult;
+    if (firstDeparture && remainingHumans.length) {
+      room.forfeitResult = {
+        ...gameResult(room, 'opponent-left', remainingHumans.map((player) => player.id)),
+        id: randomId('result-'),
+        confirmedAt: Date.now(),
+        departedPlayer: { id: departingPlayer.id, name: departingPlayer.name },
+      };
+    }
+    // AI continuation cannot change the already-final multiplayer outcome.
+    // Dispose of the room once every human has left rather than running bots alone.
+    if (!remainingHumans.length) {
+      clearTurnTimer(room);
+      room.pendingDepartures = {};
+      rooms.delete(room.code);
+      return { left: true, deleted: true, forfeitResult: room.forfeitResult || null };
+    }
+    const replacement = {
+      ...departingPlayer,
+      id: `bot:${randomId('')}`,
+      name: `AI · ${departingPlayer.name}`,
+      isBot: true,
+      replacedPlayerName: departingPlayer.name,
+    };
+    room.players[index] = replacement;
+    room.departures = [...(room.departures || []), {
+      id: randomId('departure-'),
+      at: Date.now(),
+      player: { id: departingPlayer.id, name: departingPlayer.name },
+      replacementId: replacement.id,
+      replacementName: replacement.name,
+    }].slice(-4);
+    if (room.hostId === clientId) room.hostId = remainingHumans[0].id;
+    log(room, `${departingPlayer.name}님이 나갔습니다. ${firstDeparture ? '남은 참가자의 몰수승이 확정되었습니다. ' : ''}AI가 같은 패로 게임을 이어갑니다.`);
+    if (room.activeIndex === index) {
+      // A distinct deadline invalidates already-queued events for the departed seat.
+      beginTurn(room, index, Number(room.deadlineAt || 0) + 1);
+    } else {
+      broadcast(room);
+    }
+    return { left: true, deleted: false, replacementId: replacement.id, forfeitResult: room.forfeitResult };
+  }
   if (room.hostId === clientId) {
     clearTurnTimer(room);
+    room.pendingDepartures = {};
     rooms.delete(room.code);
-    return { left: true, deleted: true };
-  }
-  if (room.phase === 'playing') {
-    finishGame(room, 'player-left', []);
-    return { left: true, deleted: false };
+    return { left: true, deleted: true, forfeitResult: room.forfeitResult || null };
   }
   room.players.splice(index, 1);
   log(room, '참가자가 대기실을 나갔습니다.');
   broadcast(room);
-  return { left: true, deleted: false };
+  return { left: true, deleted: false, forfeitResult: room.forfeitResult || null };
 }
 function updateSettings(room, clientId, payload) {
   if (room.mode === 'solo') throw new Error('AI 연습전은 만들 때 바로 시작됩니다.');

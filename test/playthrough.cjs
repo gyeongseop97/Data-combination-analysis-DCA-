@@ -78,9 +78,12 @@ const server=http.createServer((req,res)=>{
  await host.locator('[data-action=sort-rack][data-sort=group]').click();
  const holdTile=host.locator('.rack-tiles [data-tile-id="n-blue-7-1"]');const box=await holdTile.boundingBox();await host.mouse.move(box.x+box.width/2,box.y+box.height/2);await host.mouse.down();await host.waitForTimeout(650);
  assert((await host.locator('.batch-selected').count())>=2,'same-value long hold must select at least a pair');await host.mouse.up();
- await host.locator('.game-home-button').click();await host.locator('#soloGameForm').waitFor();await guests[0].evaluate(()=>audit.refreshRoomState());await guests[0].locator('#soloGameForm').waitFor();
- assert.equal(engine.rooms.has(code),false,'host exit must remove room');
- console.log('PASS long-press group selection and host exit returns guests home');
+ await host.locator('.game-home-button').click();await host.locator('#soloGameForm').waitFor();await guests[0].evaluate(()=>audit.refreshRoomState());await guests[0].locator('[data-forfeit-notice]').waitFor();
+ assert.equal(engine.rooms.has(code),true,'host exit must preserve an active multiplayer room');
+ assert.equal(room.players.filter(player=>player.isBot).length,1,'host must be replaced by AI');
+ assert.equal(room.forfeitResult.departedPlayer.id,owner.id,'host departure must establish the forfeit');
+ assert.equal(await guests[0].locator('.result-overlay').count(),0,'AI continuation must not be blocked by a result overlay');
+ console.log('PASS long-press group selection and host exit continues with AI and confirmed forfeit');
  const closing=await fresh();await closing.locator('#createRoomForm [name=playerName]').fill('Closing host');await closing.locator('#createRoomForm button[type=submit]').click();await closing.locator('.lobby-page').waitFor();
  const closingCode=await closing.locator('.invite-box strong').innerText();
  await closing.reload();await closing.locator('.lobby-page').waitFor();
